@@ -10,7 +10,7 @@ The split is fixed over all 989 source IDs before more answers arrive: SHA-256 o
 
 ## Setup and entry points
 
-Use Python 3.12. The local S-BERT snapshot must have `config.json`; the Gemini gateway key is read only from `HALLU_GATEWAY_API_KEY`. The vLLM endpoint and exact served checkpoint are runtime settings. No key, source data, cache, or output belongs in this repository.
+Use Python 3.12. The local S-BERT snapshot must have `config.json`; the Gemini gateway key is read only from `HALLU_GATEWAY_API_KEY`. Set `HALLU_GATEWAY_URL` to the deployed gateway (there is intentionally no built-in production URL). The vLLM endpoint and exact served checkpoint are runtime settings. No key, source data, cache, or output belongs in this repository.
 
 ```bash
 python -m pip install -e '.[test]'
@@ -22,6 +22,7 @@ python -m det_rep prepare \
   --work-dir /absolute/external/work
 
 export HALLU_GATEWAY_API_KEY='set outside this repository'
+export HALLU_GATEWAY_URL='https://your-gateway.europe-west4.run.app'
 export DET_REP_VLLM_BASE_URL='http://your-server:8000/v1'
 export DET_REP_VLLM_CHECKPOINT='exact-served-checkpoint-or-weight-hash'
 python -m det_rep smoke \
@@ -51,3 +52,87 @@ The arms are `B E R ER C EC RC ERC CX ECX RCX ERCX`. B receives only the shared 
 Team ownership follows the contracts: role 1 owns orchestration and Gemini/vLLM integration; role 2 implements `ClaimAligner`; role 3 implements `FrozenEvaluator`, metrics, and human audit; role 4 implements `SpanAssessor` using separately supplied original span annotations; role 5 implements `AnswerModelKG` in a distinct model/cache namespace; role 6 supplies the remaining answers through `AnswerSource` or the same CSV schema. Scientific implementations for roles 2–6 are intentionally absent. Tests use fakes only to verify integration. The copied `det_rep/core` modules preserve the existing Gemini extraction, S-BERT matching, claim verification, structured output, retries, and scientific cache behavior.
 
 Before a held-out scientific run, the team must freeze the evaluator, prompt/schema versions, Llama checkpoint, iteration count, failure policy, and full 989-answer manifest using training data. The old `strict`, `support`, and `support-critical` results remain historical baselines, not new results from this repository.
+
+## Shared Gemini gateway
+
+`gemini_gateway` is a small Cloud Run service that exposes one OpenAI-compatible
+model, `openai/gemini-3.5-flash`. It authenticates a caller with an individually
+revocable bearer key and uses its Cloud Run service identity to call Vertex AI in
+the EU; neither a Vertex API key nor a service-account key is given to recipients.
+It supports text chat, streaming, and `response_format` JSON schemas. Images,
+files, function tools, and other unsupported OpenAI fields fail explicitly.
+
+Deploy it only after authenticating `gcloud` with an account that can administer
+`project-fe2f39ea-f456-4e8f-8e8`:
+
+```bash
+gcloud auth login
+./scripts/deploy_gateway.sh
+python3.12 -m gemini_gateway.manage_keys \
+  --project project-fe2f39ea-f456-4e8f-8e8 create alice
+```
+
+The last command prints Alice's raw `gk_…` key exactly once. Send it via an
+appropriate private channel. To revoke it, run:
+
+```bash
+python3.12 -m gemini_gateway.manage_keys \
+  --project project-fe2f39ea-f456-4e8f-8e8 revoke alice
+```
+
+The service refreshes Secret Manager key records at most once a minute, so a
+new key can take up to a minute to become usable and a revocation takes effect
+within the same window, without a redeploy. The deploy script creates a €50
+monthly project budget alert at 50%, 90%, and 100%; it is an alert, not a hard
+spending limit.
+
+### Recipient quickstart: one file, one command
+
+The canonical recipient interface is
+[`gemini_recipient.py`](gemini_recipient.py). Send that one file and the
+recipient's individual `gk_…` key; they do not clone this repository, install a
+package, configure Google Cloud, or need the endpoint URL. The file uses only
+the Python standard library and contains the gateway's stable public URL.
+
+```bash
+GEMINI_GATEWAY_API_KEY='gk_alice_…' python3 gemini_recipient.py 'Explain Bayes theorem in one sentence.'
+```
+
+It is equally usable from their own code as one function:
+
+```python
+from gemini_recipient import ask_gemini
+
+answer = ask_gemini("Write a haiku about a clean API.", api_key="gk_alice_…")
+print(answer)
+```
+
+The key stays outside the file so it can be revoked independently. For users
+who prefer an HTTP client or the OpenAI Python SDK, the exact endpoint, key,
+and model contract remains available below.
+
+### Direct HTTP or OpenAI SDK
+
+```bash
+export GEMINI_GATEWAY_URL='https://your-gateway.europe-west4.run.app'
+export GEMINI_GATEWAY_API_KEY='gk_alice_...'
+curl "$GEMINI_GATEWAY_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $GEMINI_GATEWAY_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gemini-3.5-flash","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+```python
+from openai import OpenAI
+import os
+
+client = OpenAI(
+    base_url=os.environ["GEMINI_GATEWAY_URL"].rstrip("/") + "/v1",
+    api_key=os.environ["GEMINI_GATEWAY_API_KEY"],
+)
+reply = client.chat.completions.create(
+    model="openai/gemini-3.5-flash",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(reply.choices[0].message.content)
+```

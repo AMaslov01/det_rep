@@ -21,9 +21,15 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
+gateway = [
+  "fastapi>=0.115,<1",
+  "google-cloud-secret-manager>=2.20,<3",
+  "google-genai>=1,<2",
+  "uvicorn[standard]>=0.30,<1",
+]
 
 [tool.setuptools.packages.find]
-include = ["det_rep*"]
+include = ["det_rep*", "gemini_gateway*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,4 @@
+fastapi>=0.115,<1
+google-cloud-secret-manager>=2.20,<3
+google-genai>=1,<2
+uvicorn[standard]>=0.30,<1

@@ -13,8 +13,8 @@ from det_rep.gemini import GeminiFeedbackProducer, runtime_config
 
 MANIFEST = {
     "protocol": "hallu-vertex-openai-gateway-v1", "api_path": "/v1",
-    "logical_model": "openai/gemini-2.5-flash", "vertex_model": "gemini-2.5-flash",
-    "vertex_location": "europe-west4", "gateway_release": "fixture", "cloud_run_revision": "fixture",
+    "logical_model": "openai/gemini-3.5-flash", "vertex_model": "gemini-3.5-flash",
+    "vertex_location": "eu", "gateway_release": "fixture", "cloud_run_revision": "fixture",
 }
 
 

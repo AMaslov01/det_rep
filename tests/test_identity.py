@@ -7,12 +7,12 @@ from det_rep.llm import OpenAICompatibleCorrector
 def test_gateway_manifest_must_match_exact_model_and_revision():
     value = {
         "protocol": "hallu-vertex-openai-gateway-v1", "api_path": "/v1",
-        "logical_model": "openai/gemini-2.5-flash", "vertex_model": "gemini-2.5-flash",
-        "vertex_location": "europe-west4", "gateway_release": "r1", "cloud_run_revision": "abc",
+        "logical_model": "openai/gemini-3.5-flash", "vertex_model": "gemini-3.5-flash",
+        "vertex_location": "eu", "gateway_release": "r1", "cloud_run_revision": "abc",
     }
-    assert len(validate_gateway_manifest(value, "openai/gemini-2.5-flash")) == 64
+    assert len(validate_gateway_manifest(value, "openai/gemini-3.5-flash")) == 64
     with pytest.raises(ValueError, match="cloud_run_revision"):
-        validate_gateway_manifest({**value, "cloud_run_revision": ""}, "openai/gemini-2.5-flash")
+        validate_gateway_manifest({**value, "cloud_run_revision": ""}, "openai/gemini-3.5-flash")
 
 
 def test_generation_cache_fingerprint_changes_with_checkpoint_and_never_calls_cache_only(tmp_path):

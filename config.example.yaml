@@ -1,7 +1,7 @@
 # Gemini identity is validated against the authenticated gateway manifest at runtime.
 # vLLM endpoint and exact checkpoint come from CLI/environment; no secrets here.
 llm:
-  model: openai/gemini-2.5-flash
+  model: openai/gemini-3.5-flash
   api_base: null
   api_key_env: HALLU_GATEWAY_API_KEY
   temperature: 0.0

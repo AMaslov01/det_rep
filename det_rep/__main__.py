@@ -52,7 +52,7 @@ def main() -> None:
     smoke.add_argument("--work-dir", required=True)
     smoke.add_argument("--run-dir", required=True)
     smoke.add_argument("--config", default=str(PROJECT_ROOT / "config.example.yaml"))
-    smoke.add_argument("--gateway-url", default=os.environ.get("HALLU_GATEWAY_URL", "https://hallu-vertex-gateway-453887629111.europe-west4.run.app"))
+    smoke.add_argument("--gateway-url", default=os.environ.get("HALLU_GATEWAY_URL"))
     smoke.add_argument("--embedding-path", required=True)
     smoke.add_argument("--vllm-url", default=os.environ.get("DET_REP_VLLM_BASE_URL"))
     smoke.add_argument("--checkpoint", default=os.environ.get("DET_REP_VLLM_CHECKPOINT"))
@@ -89,6 +89,8 @@ def main() -> None:
 
     if not args.vllm_url or not args.checkpoint:
         raise ValueError("local vLLM URL and exact checkpoint are required")
+    if not args.gateway_url:
+        raise ValueError("--gateway-url or HALLU_GATEWAY_URL is required")
     import yaml
 
     from .gemini import GeminiFeedbackProducer, fetch_gateway_manifest, runtime_config

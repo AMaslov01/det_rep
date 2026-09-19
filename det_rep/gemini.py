@@ -24,7 +24,7 @@ FEEDBACK_PROTOCOL = "det-rep-gemini-feedback-v1"
 def validate_gateway_manifest(manifest: dict[str, Any], model: str) -> str:
     expected = {
         "protocol": GATEWAY_PROTOCOL, "api_path": "/v1", "logical_model": model,
-        "vertex_model": model.removeprefix("openai/"), "vertex_location": "europe-west4",
+        "vertex_model": model.removeprefix("openai/"), "vertex_location": "eu",
     }
     if not model.startswith("openai/"):
         raise ValueError("Gemini logical model must use openai/ prefix")

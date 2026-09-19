@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.gitignore
+.venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+tests/
+det_rep/
+README.md
