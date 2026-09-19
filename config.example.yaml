@@ -1,0 +1,98 @@
+# Gemini identity is validated against the authenticated gateway manifest at runtime.
+# vLLM endpoint and exact checkpoint come from CLI/environment; no secrets here.
+llm:
+  model: openai/gemini-2.5-flash
+  api_base: null
+  api_key_env: HALLU_GATEWAY_API_KEY
+  temperature: 0.0
+  request_timeout_s: 90
+  max_retries: 5
+  retry_backoff_base_s: 2
+  retry_backoff_max_s: 60
+  rate_limit_cooldown_max_s: 900
+  rate_limit_retry_deadline_s: 1800
+  retry_deadline_s: 1800
+  request_min_interval_s: 4
+  concurrency: 1
+  structured_output_transport: response_format
+  structured_output_backend: vertex
+  structured_output_request_backend: null
+  model_revision: null
+  runtime_fingerprint: null
+  max_tokens: 4096
+extraction:
+  cluster: true
+  max_protocol_retries: 3
+  max_tokens_ceiling: 32768
+  cluster_context_mode: source_text
+  cluster_max_items: null
+  cluster_min_retention_ratio: null
+  cluster_retention_min_items: 5
+  context_chunk_chars: 6000
+  serial_chunking: true
+  explicit_clustering: true
+matching:
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  embedding_model_revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+  embedding_model_path: null
+  embedding_device: cpu
+  local_files_only: true
+  entity_sim_threshold: 0.9
+  relation_sim_threshold: 0.75
+  allow_substring_match: true
+  direction_sensitive_edges: true
+  inverse_edge_match: false
+  min_substring_chars: 2
+  stopwords:
+  - a
+  - an
+  - the
+  - it
+  - its
+  - is
+  - of
+  - to
+  - in
+  - true
+  - at
+  - and
+  - or
+  - this
+  - that
+  - these
+  - those
+  - he
+  - she
+  - they
+  - we
+  - you
+relation_verifier:
+  prompt_version: relation-entailment-v1
+  max_evidence_sentences: 4
+  max_protocol_retries: 3
+support_critical:
+  claim_extractor:
+    prompt_version: atomic-claims-v1
+    max_tokens: 2048
+    max_tokens_ceiling: 8192
+    max_protocol_retries: 4
+    chunk_chars: 900
+    min_chunk_chars: 160
+  coverage_reviewer:
+    prompt_version: full-context-coverage-v1
+    max_tokens: 2048
+    max_tokens_ceiling: 8192
+    max_protocol_retries: 4
+    chunk_chars: 900
+    min_chunk_chars: 160
+  claim_verifier:
+    prompt_version: closed-world-claim-verdict-v1
+    max_tokens: 512
+    max_tokens_ceiling: 8192
+    max_protocol_retries: 4
+    max_evidence_sentences: 8
+corrector:
+  model: meta-llama/Llama-3.1-8B-Instruct
+  seed: 42
+  temperature: 0.0
+  max_tokens: 1024
