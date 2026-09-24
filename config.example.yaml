@@ -70,6 +70,7 @@ relation_verifier:
   prompt_version: relation-entailment-v1
   max_evidence_sentences: 4
   max_protocol_retries: 3
+claim_method: veriscore
 support_critical:
   claim_extractor:
     prompt_version: atomic-claims-v1
@@ -91,6 +92,27 @@ support_critical:
     max_tokens_ceiling: 8192
     max_protocol_retries: 4
     max_evidence_sentences: 8
+veriscore:
+  coverage_review: false
+  claim_extractor:
+    prompt_version: veriscore-claims-v1
+    mode: window
+    context_before: 3
+    context_after: 1
+    paragraph_lead_threshold: 5
+    min_sentence_chars: 10
+    examples_path: null
+    max_tokens: 1024
+    max_tokens_ceiling: 8192
+    max_protocol_retries: 4
+  claim_verifier:
+    prompt_version: veriscore-verdict-v1
+    labels: binary
+    evidence_scope: top_k
+    max_evidence_sentences: 10
+    max_tokens: 512
+    max_tokens_ceiling: 8192
+    max_protocol_retries: 4
 corrector:
   model: meta-llama/Llama-3.1-8B-Instruct
   seed: 42
