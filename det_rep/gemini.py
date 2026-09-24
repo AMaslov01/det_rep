@@ -14,11 +14,13 @@ from .core.critical import CriticalClaimPipeline, CriticalClaimVerifier
 from .core.extract import KGExtractor
 from .core.matching import RefGraph, SBERTEmbedder
 from .core.metrics import score_response
+from .core.veriscore import VeriScorePipeline, veriscore_protocol
 from .util import atomic_json, digest, file_digest, read_json, text_digest
 
 
 GATEWAY_PROTOCOL = "hallu-vertex-openai-gateway-v1"
 FEEDBACK_PROTOCOL = "det-rep-gemini-feedback-v1"
+CLAIM_METHODS = ("support-critical", "veriscore")
 
 
 def validate_gateway_manifest(manifest: dict[str, Any], model: str) -> str:
@@ -80,6 +82,7 @@ def runtime_config(base: dict[str, Any], manifest: dict[str, Any], gateway_url: 
             "gemini.py", "contracts.py", "evidence.py", "core/cache.py", "core/config.py",
             "core/critical.py", "core/dspy_adapter.py",
             "core/extract.py", "core/matching.py", "core/metrics.py", "core/retry.py", "core/verifier.py",
+            "core/veriscore.py",
         )
     })
     base_url = gateway_url.rstrip("/")
@@ -106,6 +109,10 @@ def runtime_config(base: dict[str, Any], manifest: dict[str, Any], gateway_url: 
     for name, folder in (("claim_extractor", "critical_claims"), ("coverage_reviewer", "critical_coverage"), ("claim_verifier", "critical_verdicts")):
         value["support_critical"][name]["cache_dir"] = str(root / folder)
         value["support_critical"][name]["cache_read_dirs"] = []
+    if "veriscore" in value:
+        for name, folder in (("claim_extractor", "veriscore_claims"), ("claim_verifier", "veriscore_verdicts")):
+            value["veriscore"][name]["cache_dir"] = str(root / folder)
+            value["veriscore"][name]["cache_read_dirs"] = []
     return Config(value)
 
 
@@ -114,15 +121,21 @@ class GeminiFeedbackProducer:
         self.cfg = cfg
         self.cache_only = cache_only
         self.manifest_sha = validate_gateway_manifest(manifest, cfg.llm.model)
+        self.claim_method = str(cfg.get("claim_method", "support-critical"))
+        if self.claim_method not in CLAIM_METHODS:
+            raise ValueError(f"unknown claim method: {self.claim_method}")
+        claim_protocol: dict[str, Any] = {
+            name: {key: value for key, value in getattr(cfg.support_critical, name).to_dict().items() if "cache" not in key}
+            for name in ("claim_extractor", "coverage_reviewer", "claim_verifier")
+        }
+        if self.claim_method == "veriscore":
+            claim_protocol["veriscore"] = veriscore_protocol(cfg)
         self.fingerprint = digest({
             "protocol": FEEDBACK_PROTOCOL, "gateway_manifest": self.manifest_sha,
             "llm_runtime": cfg.llm.runtime_fingerprint,
             "llm_model_revision": cfg.llm.model_revision,
             "extraction": cfg.extraction.to_dict(), "matching": cfg.matching.to_dict(),
-            "claim_protocol": {
-                name: {key: value for key, value in getattr(cfg.support_critical, name).to_dict().items() if "cache" not in key}
-                for name in ("claim_extractor", "coverage_reviewer", "claim_verifier")
-            },
+            "claim_protocol": claim_protocol,
             "relation_protocol": {key: value for key, value in cfg.relation_verifier.to_dict().items() if "cache" not in key},
         })
         self.cache_dir = Path(cache_dir)
@@ -136,7 +149,8 @@ class GeminiFeedbackProducer:
             device="cpu", local_files_only=True,
         )
         self.relation_verifier = CriticalClaimVerifier(cfg, cache_only=cache_only, embedder=self.embedder)
-        self.claim_pipeline = CriticalClaimPipeline(cfg, cache_only=cache_only, embedder=self.embedder)
+        pipeline_type = VeriScorePipeline if self.claim_method == "veriscore" else CriticalClaimPipeline
+        self.claim_pipeline = pipeline_type(cfg, cache_only=cache_only, embedder=self.embedder)
 
     def produce(self, example: Example, answer: str, evidence: EvidencePack) -> FeedbackRecord:
         answer_sha = text_digest(answer)
@@ -183,11 +197,16 @@ class GeminiFeedbackProducer:
         for index, item in enumerate((score.critical or {}).get("claim_audits", [])):
             claim_id = f"c{index}"
             claim = item["claim"]
-            claims.append({
+            entry = {
                 "id": claim_id, "text": claim["text"], "start": claim["start"], "end": claim["end"],
                 "verdict": item["verdict"], "candidate_sources": claim.get("sources", []),
                 "protocol_fallback": bool(item.get("verifier_protocol_fallback")),
-            })
+            }
+            if "sentence_id" in claim:
+                entry["sentence_id"] = claim["sentence_id"]
+            if "label" in item:
+                entry["label"] = item["label"]
+            claims.append(entry)
             linked = sorted({
                 ("C" if span.get("source") == "context" else "Q") + str(span.get("index"))
                 for span in item.get("evidence", [])
