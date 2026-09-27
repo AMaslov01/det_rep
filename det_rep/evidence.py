@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .contracts import EvidencePack, EvidenceSentence, Example
-from .core.verifier import _sentences
+from .core.evidence_spans import _sentences
 from .util import digest
 
 

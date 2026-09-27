@@ -1,4 +1,4 @@
-"""The twelve fixed correction treatments and their isolated prompt renderer."""
+"""The four E/C correction treatments and their isolated prompt renderer."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import json
 from .contracts import ARM_CODES, EvidencePack, Example, FeedbackRecord
 
 
-PROMPT_VERSION = "correction-prompt-v1"
+PROMPT_VERSION = "correction-prompt-ec-v1"
 SYSTEM_PROMPT = (
     "Revise the answer to the question using only the supplied source evidence. "
     "Correct unsupported facts while preserving supported, answer-relevant information. "
@@ -14,18 +14,29 @@ SYSTEM_PROMPT = (
 )
 
 
-def visible_feedback(record: FeedbackRecord, arm: str) -> dict[str, object]:
+def visible_feedback(record: FeedbackRecord | None, arm: str) -> dict[str, object]:
     if arm not in ARM_CODES:
         raise ValueError(f"unknown correction arm: {arm}")
+    if arm == "B":
+        if record is not None:
+            raise ValueError("baseline prompt must not depend on feedback")
+        return {}
+    if record is None:
+        raise ValueError(f"{arm} requires feedback")
+    if "E" in arm and record.entity_status != "ok":
+        raise ValueError("entity feedback is unavailable")
+    if "C" in arm and record.claim_status != "ok":
+        raise ValueError("claim feedback is unavailable")
     result: dict[str, object] = {}
-    for letter, name in (("E", "entities"), ("R", "relations"), ("C", "claims"), ("X", "links")):
-        if letter in arm:
-            result[name] = getattr(record, name)
+    if "E" in arm:
+        result["entities"] = record.entities
+    if "C" in arm:
+        result["claims"] = record.claims
     return result
 
 
-def render_prompt(example: Example, current_answer: str, evidence: EvidencePack, record: FeedbackRecord, arm: str) -> str:
-    if record.source_id != example.source_id or evidence.source_id != example.source_id:
+def render_prompt(example: Example, current_answer: str, evidence: EvidencePack, record: FeedbackRecord | None, arm: str) -> str:
+    if evidence.source_id != example.source_id or (record is not None and record.source_id != example.source_id):
         raise ValueError("cross-source feedback or evidence")
     blocks = visible_feedback(record, arm)
     prompt = (

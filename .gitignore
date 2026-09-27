@@ -13,3 +13,5 @@ results/
 *.jsonl
 config.local.yaml
 .env*
+tmp/
+.DS_Store

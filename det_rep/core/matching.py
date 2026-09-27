@@ -1,14 +1,10 @@
-"""Entity/relation matching (HalluGraph's match()/align() adapted to KGGen's untyped strings).
+"""Entity matching against the fixed source KG.
 
 Entity match(v, w) is TRUE if ANY of:
   1. exact normalized string equality
   2. (if allow_substring_match) token-boundary substring in either direction, where the
      shorter side has >= min_substring_chars and is not a stopword
   3. cosine(S-BERT(v), S-BERT(w)) >= entity_sim_threshold (tau_e)
-
-Relation align(e=(s,r,o), e'=(s',r',o')) is TRUE iff:
-  - match(s,s') AND match(o,o')   (direction-sensitive; inverse-edge ablation optional), AND
-  - relation labels compatible: exact normalized equality OR cosine(r,r') >= relation_sim_threshold
 
 Embeddings go through an injectable ``Embedder`` so tests / offline runs avoid torch.
 """
@@ -149,30 +145,19 @@ class EntityMatch:
     method: str | None = None  # exact | substring | embedding
 
 
-@dataclass
-class RelationAlign:
-    matched: bool
-    ref: tuple[str, str, str] | None = None
-    method: str | None = None  # e.g. "exact+forward", "embedding+inverse"
-
-
 # --------------------------------------------------------------------------------------
-# RefGraph: precomputes everything needed to match a response graph against G_ref
+# EntityMatcher: source entities and embeddings are prepared once per answer.
 # --------------------------------------------------------------------------------------
-class RefGraph:
+class EntityMatcher:
     def __init__(
         self,
         entities: Iterable[str],
-        relations: Iterable[tuple[str, str, str]],
         cfg_matching,
         embedder: Embedder | None,
     ):
         self.embedder = embedder
         self.tau_e = float(cfg_matching.entity_sim_threshold)
-        self.tau_r = float(cfg_matching.relation_sim_threshold)
         self.allow_substring = bool(cfg_matching.allow_substring_match)
-        self.direction_sensitive = bool(cfg_matching.direction_sensitive_edges)
-        self.inverse_edge = bool(getattr(cfg_matching, "inverse_edge_match", False))
         self.min_sub = int(getattr(cfg_matching, "min_substring_chars", 2))
         self.stopwords = set(getattr(cfg_matching, "stopwords", []) or [])
 
@@ -186,24 +171,10 @@ class RefGraph:
                 self.ent_norm.append(n)
         self.ent_index = {n: i for i, n in enumerate(self.ent_norm)}
 
-        # normalized reference relations
-        self.rel_norm: list[tuple[str, str, str]] = []
-        rseen = set()
-        for (s, r, o) in relations:
-            t = (normalize(s), normalize(r), normalize(o))
-            if all(t) and t not in rseen:
-                rseen.add(t)
-                self.rel_norm.append(t)
-
         # precompute embeddings (once) if an embedder is available
         self._ent_emb: np.ndarray | None = None
-        self._rel_pred_emb: dict[str, np.ndarray] = {}
         if self.embedder is not None and self.ent_norm:
             self._ent_emb = self.embedder.encode(self.ent_norm)
-        if self.embedder is not None and self.rel_norm:
-            preds = sorted({t[1] for t in self.rel_norm})
-            embs = self.embedder.encode(preds)
-            self._rel_pred_emb = {p: embs[i] for i, p in enumerate(preds)}
 
         self._match_cache: dict[str, EntityMatch] = {}
 
@@ -238,53 +209,3 @@ class RefGraph:
             if float(sims[j]) >= self.tau_e:
                 return EntityMatch(True, self.ent_norm[j], "embedding")
         return EntityMatch(False)
-
-    # -- relation label compatibility ----------------------------------------
-    def _rel_compatible(self, r_a: str, r_ref: str) -> bool:
-        if r_a == r_ref:
-            return True
-        if self.embedder is None:
-            return False
-        # ref predicate embedding is precomputed; encode the response predicate on demand
-        ref_emb = self._rel_pred_emb.get(r_ref)
-        if ref_emb is None:
-            ref_emb = self.embedder.encode([r_ref])[0]
-        a_emb = self.embedder.encode([r_a])[0]
-        return float(a_emb @ ref_emb) >= self.tau_r
-
-    # -- relation alignment ---------------------------------------------------
-    def align_relation(self, e: tuple[str, str, str]) -> RelationAlign:
-        s, r, o = normalize(e[0]), normalize(e[1]), normalize(e[2])
-        if not (s and o):
-            return RelationAlign(False)
-        ms = self.match_entity(s)
-        mo = self.match_entity(o)
-        forward_ok = ms.matched and mo.matched
-        inverse_ok = False
-        if self.inverse_edge or not self.direction_sensitive:
-            # accept swapped orientation: match(s, o') AND match(o, s')
-            inverse_ok = ms.matched and mo.matched  # endpoints matched *somewhere* in ref
-        for (s2, r2, o2) in self.rel_norm:
-            if not self._rel_compatible(r, r2):
-                continue
-            if forward_ok and self._pair_matches(s, s2) and self._pair_matches(o, o2):
-                return RelationAlign(True, (s2, r2, o2), "forward")
-            if inverse_ok and self._pair_matches(s, o2) and self._pair_matches(o, s2):
-                return RelationAlign(True, (s2, r2, o2), "inverse")
-        return RelationAlign(False)
-
-    def _pair_matches(self, v_norm: str, w_norm: str) -> bool:
-        """match() between a response endpoint and a specific ref endpoint."""
-        if v_norm == w_norm:
-            return True
-        if self.allow_substring:
-            shorter, longer = (v_norm, w_norm) if len(v_norm) <= len(w_norm) else (w_norm, v_norm)
-            if len(shorter) >= self.min_sub and shorter not in self.stopwords:
-                if _token_boundary_substring(shorter, longer):
-                    return True
-        if self.embedder is not None:
-            a = self.embedder.encode([v_norm])[0]
-            b = self.embedder.encode([w_norm])[0]
-            if float(a @ b) >= self.tau_e:
-                return True
-        return False

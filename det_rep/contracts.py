@@ -1,15 +1,12 @@
-"""Versioned hand-off records for the six research roles.
-
-Scientific producers implement these protocols. Test fakes belong in tests only.
-"""
+"""Versioned records for the E/C correction run and its blind handoff."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 
-SCHEMA_VERSION = "det-rep-v1"
-ARM_CODES = ("B", "E", "R", "ER", "C", "EC", "RC", "ERC", "CX", "ECX", "RCX", "ERCX")
+SCHEMA_VERSION = "det-rep-ec-v1"
+ARM_CODES = ("B", "E", "C", "EC")
 
 
 @dataclass(frozen=True)
@@ -61,11 +58,19 @@ class FeedbackRecord:
     evidence_sha256: str
     producer_fingerprint: str
     entities: tuple[dict[str, Any], ...]
-    relations: tuple[dict[str, Any], ...]
     claims: tuple[dict[str, Any], ...]
-    links: tuple[dict[str, Any], ...]
-    graph_status: str
+    entity_status: str
+    claim_status: str
     schema_version: str = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        valid_statuses = {"ok", "failed", "not_requested"}
+        if self.entity_status not in valid_statuses or self.claim_status not in valid_statuses:
+            raise ValueError("invalid feedback component status")
+        if self.entity_status == "failed" and self.entities:
+            raise ValueError("failed entity feedback cannot contain entities")
+        if self.claim_status == "failed" and self.claims:
+            raise ValueError("failed claim feedback cannot contain claims")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,7 +79,7 @@ class FeedbackRecord:
     def from_dict(cls, value: dict[str, Any]) -> "FeedbackRecord":
         if value.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("feedback schema mismatch")
-        return cls(**{**value, **{name: tuple(value[name]) for name in ("entities", "relations", "claims", "links")}})
+        return cls(**{**value, **{name: tuple(value[name]) for name in ("entities", "claims")}})
 
 
 @dataclass(frozen=True)
@@ -91,7 +96,7 @@ class Generation:
 class TrajectoryStep:
     iteration: int
     input_answer: str
-    feedback_sha256: str
+    feedback_sha256: str | None
     prompt_sha256: str
     generation: Generation
 
@@ -122,41 +127,13 @@ class EvaluationRequest:
     schema_version: str = SCHEMA_VERSION
 
 
-@dataclass(frozen=True)
-class EvaluationResult:
-    request_id: str
-    original_claims: tuple[dict[str, Any], ...]
-    revised_claims: tuple[dict[str, Any], ...]
-    alignments: tuple[dict[str, Any], ...]
-    verdicts: tuple[dict[str, Any], ...]
-    completeness: dict[str, Any]
-    schema_version: str = SCHEMA_VERSION
-
-
 class FeedbackProducer(Protocol):
-    def produce(self, example: Example, answer: str, evidence: EvidencePack) -> FeedbackRecord: ...
+    fingerprint: str
+
+    def produce_entities(self, example: Example, answer: str, evidence: EvidencePack) -> tuple[dict[str, Any], ...]: ...
+
+    def produce_claims(self, example: Example, answer: str, evidence: EvidencePack) -> tuple[dict[str, Any], ...]: ...
 
 
 class Corrector(Protocol):
     def generate(self, prompt: str, *, arm: str, iteration: int) -> Generation: ...
-
-
-class ClaimAligner(Protocol):  # participant 2
-    """Extract original/revised atomic claims and align corresponding claims."""
-    def align(self, request: EvaluationRequest) -> tuple[dict[str, Any], ...]: ...
-
-
-class FrozenEvaluator(Protocol):  # participant 3
-    def evaluate(self, request: EvaluationRequest) -> EvaluationResult: ...
-
-
-class SpanAssessor(Protocol):  # participant 4
-    def assess(self, request: EvaluationRequest, *, original_spans: tuple[dict[str, Any], ...]) -> dict[str, Any]: ...
-
-
-class AnswerModelKG(Protocol):  # participant 5; distinct from Gemini cache namespace
-    def extract(self, text: str, *, model_fingerprint: str) -> dict[str, Any]: ...
-
-
-class AnswerSource(Protocol):  # participant 6
-    def load(self) -> tuple[Example, ...]: ...

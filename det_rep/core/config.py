@@ -61,3 +61,18 @@ def resolve_api_key(cfg: Config) -> str | None:
     if not env_name:
         return None
     return os.environ.get(env_name)
+
+
+def litellm_transport_model(cfg: Config) -> str:
+    """Preserve the gateway's logical model ID through LiteLLM routing.
+
+    LiteLLM removes its leading ``openai/`` provider selector before sending
+    an OpenAI-compatible request. The Vertex gateway deliberately exposes a
+    logical ID that also starts with ``openai/``, so it needs a second prefix
+    at the LiteLLM call boundary. The configured model and run identity keep
+    the single-prefix logical ID returned by the gateway manifest.
+    """
+    model = str(cfg.llm.model)
+    if cfg.llm.get("structured_output_backend") == "vertex" and model.startswith("openai/"):
+        return "openai/" + model
+    return model

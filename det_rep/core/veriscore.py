@@ -10,13 +10,10 @@ from typing import Any, Callable, Sequence
 
 from .cache import CacheOnlyMissError, config_value
 from .critical import (
-    AtomicClaim,
     CriticalClaimVerifier,
     CriticalOutputLimitError,
     CriticalProtocolError,
-    FullContextReviewer,
     _CachedComponent,
-    select_claim_evidence,
 )
 from .dspy_adapter import (
     StructuredOutputParseError,
@@ -26,21 +23,10 @@ from .dspy_adapter import (
 )
 from .matching import Embedder, normalize
 from .retry import RequestPacer
-from .verifier import EvidenceSpan, _sentences
+from .evidence_spans import _sentences
 
 
-VERISCORE_PROTOCOL = "veriscore-v1"
-LABEL_SETS: dict[str, tuple[str, ...]] = {
-    "binary": ("supported", "unsupported"),
-    "ternary": ("supported", "contradicted", "inconclusive"),
-}
-LABEL_VERDICTS = {
-    "supported": "entailed",
-    "unsupported": "unsupported",
-    "contradicted": "contradicted",
-    "inconclusive": "unsupported",
-}
-FALLBACK_REASONS = frozenset({"structured_output_exhausted", "transient_exhausted"})
+VERISCORE_PROTOCOL = "det-rep-veriscore-ec-v2"
 NO_VERIFIABLE_CLAIM = "No verifiable claim."
 CLAIM_LIST_SCHEMA: dict[str, Any] = {"type": "array", "items": {"type": "string", "minLength": 1}}
 CLAIM_TEXT_SCHEMA: dict[str, Any] = {
@@ -60,8 +46,6 @@ _ABBREVIATIONS = frozenset({
     "jr.", "lt.", "ltd.", "mr.", "mrs.", "ms.", "mt.", "no.", "p.m.", "prof.", "sgt.", "sr.", "st.",
     "u.k.", "u.s.", "vs.",
 })
-_BINARY_LABELS = {"supported": "supported", "contradicted": "unsupported", "inconclusive": "unsupported"}
-
 _EXTRACTION_RULES = (
     "You are checking how factual a piece of text is. Break the sentence marked between <SOS> and <EOS> into "
     "verifiable claims: fine-grained facts that could be confirmed or refuted against reliable external sources.\n"
@@ -92,36 +76,11 @@ _BATCH_RULES = (
     "ID, with an empty claims list when the sentence has no verifiable claim. Each example shows one marked "
     "sentence."
 )
-_VERIFICATION_INTRO = (
-    "You judge whether a claim is supported by evidence sentences taken from the source passages. Use only the "
-    "evidence and no outside knowledge. Some evidence sentences may be unrelated to the claim.\n"
-    "- supported: every part of the claim, including its entities, relation, time, location, quantities, and "
-    "other modifiers, is supported by the evidence, and no part is contradicted.\n"
-)
-_VERIFICATION_RULES = {
-    "binary": _VERIFICATION_INTRO + "- unsupported: the claim is not supported.",
-    "ternary": _VERIFICATION_INTRO + (
-        "- contradicted: some part of the claim is contradicted by the evidence, and no evidence supports that "
-        "same part.\n"
-        "- inconclusive: some part of the claim is neither supported nor contradicted by the evidence; some part "
-        "is supported by one evidence sentence and contradicted by another; or an entity in the claim has no "
-        "clear referent (for example \"the approach\" or \"a book\")."
-    ),
-}
-
-
 @dataclass(frozen=True)
 class ExtractionExample:
     window: str
     claims: tuple[str, ...]
     question: str = ""
-
-
-@dataclass(frozen=True)
-class VerificationExample:
-    claim: str
-    evidence: tuple[str, ...]
-    label: str
 
 
 DEFAULT_EXTRACTION_EXAMPLES: dict[str, tuple[ExtractionExample, ...]] = {
@@ -230,52 +189,6 @@ DEFAULT_EXTRACTION_EXAMPLES: dict[str, tuple[ExtractionExample, ...]] = {
     ),
 }
 
-VERIFICATION_EXAMPLES: tuple[VerificationExample, ...] = (
-    VerificationExample(
-        "The Golden Gate Bridge opened in 1937.",
-        (
-            "The Golden Gate Bridge is a suspension bridge that spans the Golden Gate strait.",
-            "The bridge opened in 1937 after about four years of construction.",
-        ),
-        "supported",
-    ),
-    VerificationExample(
-        "Mount Kilimanjaro is located in Kenya.",
-        ("Mount Kilimanjaro is a dormant volcano in Tanzania.", "It is the highest mountain in Africa."),
-        "contradicted",
-    ),
-    VerificationExample(
-        "The Louvre was the most visited art museum in the world in 2019.",
-        ("The Louvre is the national art museum of France, located in Paris.", "The museum houses the Mona Lisa."),
-        "inconclusive",
-    ),
-    VerificationExample(
-        "The study found that the treatment reduced symptoms by 40 percent.",
-        (
-            "Several studies have examined treatments for seasonal allergies.",
-            "One trial reported a 40 percent reduction in symptoms with a nasal spray.",
-        ),
-        "inconclusive",
-    ),
-    VerificationExample(
-        "The Riverside Festival is held every July.",
-        (
-            "The Riverside Festival is held every July in the old harbor.",
-            "According to the organizers, the Riverside Festival moved to August in 2021.",
-        ),
-        "inconclusive",
-    ),
-    VerificationExample(
-        "Honey can be stored for years without spoiling.",
-        (
-            "Bees produce honey from the nectar of flowers.",
-            "Because of its low moisture content and high acidity, honey resists spoilage and can keep for years.",
-        ),
-        "supported",
-    ),
-)
-
-
 @dataclass(frozen=True)
 class AnswerSentence:
     id: str
@@ -290,39 +203,16 @@ class AnswerSentence:
 class VerifiableClaim:
     text: str
     sentence_id: str | None
-    start: int
-    end: int
+    sentence_start: int
+    sentence_end: int
     sources: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "text": self.text, "sentence_id": self.sentence_id, "start": self.start, "end": self.end,
+            "text": self.text, "sentence_id": self.sentence_id,
+            "sentence_start": self.sentence_start, "sentence_end": self.sentence_end,
             "sources": list(self.sources),
         }
-
-
-@dataclass(frozen=True)
-class VeriScoreVerdict:
-    label: str | None
-    evidence: tuple[EvidenceSpan, ...]
-    cache_hit: bool = False
-    fallback_reason: str | None = None
-
-    def __post_init__(self) -> None:
-        if (self.label is None) == (self.fallback_reason is None):
-            raise ValueError("a VeriScore verdict needs exactly one label or fallback reason")
-        if self.label is not None and self.label not in LABEL_VERDICTS:
-            raise ValueError(f"unsupported VeriScore label {self.label!r}")
-        if self.fallback_reason is not None and self.fallback_reason not in FALLBACK_REASONS:
-            raise ValueError(f"unsupported VeriScore fallback {self.fallback_reason!r}")
-
-    @property
-    def verdict(self) -> str:
-        return "unknown" if self.label is None else LABEL_VERDICTS[self.label]
-
-    @property
-    def protocol_fallback(self) -> bool:
-        return self.fallback_reason is not None
 
 
 def answer_sentences(text: str, min_chars: int = 10) -> list[AnswerSentence]:
@@ -520,57 +410,13 @@ def _batch_outcome(payload: dict[str, Any], ids: Sequence[str]) -> tuple[str, di
     return route, {}
 
 
-def _sentence_claims(sentence: AnswerSentence, texts: Sequence[str], fallback: bool) -> list[VerifiableClaim]:
-    source = "veriscore_fallback_sentence" if fallback else "veriscore"
-    return [VerifiableClaim(text, sentence.id, sentence.start, sentence.end, (source,)) for text in texts]
-
-
-def _sentence_id(sentences: Sequence[AnswerSentence], offset: int) -> str | None:
-    return next((sentence.id for sentence in sentences if sentence.start <= offset < sentence.end), None)
-
-
-def _evidence_id(span: EvidenceSpan) -> str:
-    return f"{'C' if span.source == 'context' else 'Q'}{span.index}"
-
-
-def _source_spans(context: str, query: str | None) -> list[EvidenceSpan]:
-    return [
-        EvidenceSpan(source, index, start, end, text, 0)
-        for source, value in (("context", context or ""), ("query", query or ""))
-        for index, start, end, text in _sentences(value)
-    ]
-
-
-def _verification_request(claim: str, evidence: Sequence[tuple[str, str]]) -> str:
-    rendered = "\n".join(f"[{identifier}] {text}" for identifier, text in evidence) or "(no evidence retrieved)"
-    return f"Claim: {claim}\nEvidence:\n{rendered}"
-
-
-def _render_verification_example(number: int, example: VerificationExample, labels: str) -> str:
-    label = example.label if labels == "ternary" else _BINARY_LABELS[example.label]
-    request = _verification_request(example.claim, [(f"C{index}", text) for index, text in enumerate(example.evidence)])
-    return f"Example {number}\n{request}\nOutput: {json.dumps({'verdict': label})}"
-
-
-def verification_messages(labels: str, claim: str, evidence: Sequence[EvidenceSpan]) -> list[dict[str, str]]:
-    system = "\n\n".join([
-        _VERIFICATION_RULES[labels],
-        "Examples:",
-        *(
-            _render_verification_example(number, example, labels)
-            for number, example in enumerate(VERIFICATION_EXAMPLES, start=1)
-        ),
-        'Return a JSON object {"verdict": ...} with exactly one allowed label.',
-    ])
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": _verification_request(claim, [(_evidence_id(span), span.text) for span in evidence])},
-    ]
+def _sentence_claims(sentence: AnswerSentence, texts: Sequence[str]) -> list[VerifiableClaim]:
+    return [VerifiableClaim(text, sentence.id, sentence.start, sentence.end, ("veriscore",)) for text in texts]
 
 
 class VerifiableClaimExtractor(_CachedComponent):
     component = "veriscore_claim_extractor"
-    protocol = "veriscore-claims-v1"
+    protocol = "det-rep-veriscore-claims-v2"
     config_root = "veriscore"
     repair_message = (
         "The preceding structured answer was rejected. Return one JSON object matching the given schema exactly, "
@@ -609,21 +455,20 @@ class VerifiableClaimExtractor(_CachedComponent):
     def _examples(self, query: str | None) -> tuple[ExtractionExample, ...]:
         return self.examples["qa" if _is_qa(query) else "text"]
 
-    def _load_texts(self, key: str) -> tuple[list[str], bool] | None:
+    def _load_texts(self, key: str) -> list[str] | None:
         cached = self._load(key)
         if cached is None:
             return None
+        if cached.get(_FALLBACK_FIELD):
+            raise CriticalProtocolError("VeriScore claim cache contains a sentence fallback")
         try:
             texts = _claim_texts({"claims": cached.get("claims")})
-            fallback = cached.get(_FALLBACK_FIELD, False)
-            if not isinstance(fallback, bool):
-                raise StructuredOutputParseError("VeriScore claim cache has a malformed fallback marker")
         except (StructuredOutputParseError, StructuredOutputSchemaError) as exc:
             if self.cache_only:
                 raise CacheOnlyMissError(self.component, key, self.cache_dir / f"{key}.json") from exc
             return None
         self._record(key, 0.0, cached=True)
-        return texts, fallback
+        return texts
 
     def _extract_window(
         self, response: str, sentences: Sequence[AnswerSentence], position: int, query: str | None
@@ -637,22 +482,21 @@ class VerifiableClaimExtractor(_CachedComponent):
         key = self._cache_key({"mode": "window", "messages": messages})
         cached = self._load_texts(key)
         if cached is not None:
-            return _sentence_claims(sentence, *cached)
+            return _sentence_claims(sentence, cached)
         if self.cache_only:
             raise CacheOnlyMissError(self.component, key, self.cache_dir / f"{key}.json")
         start = time.perf_counter()
-        fallback = False
         try:
             texts = self._retry_validated_json(messages, CLAIM_TEXT_SCHEMA, "verifiable_claims", _claim_texts)
-        except (StructuredOutputParseError, StructuredOutputSchemaError):
-            texts, fallback = _clean_claims([sentence.text]), True
+        except (StructuredOutputParseError, StructuredOutputSchemaError) as exc:
+            raise CriticalProtocolError("verifiable claim extraction protocol exhausted") from exc
         except Exception as exc:
-            if not is_retryable_llm_exception(exc):
-                raise CriticalProtocolError("verifiable claim extraction failed") from exc
-            texts, fallback = _clean_claims([sentence.text]), True
-        self._save(key, {"claims": texts, _FALLBACK_FIELD: fallback})
+            if is_retryable_llm_exception(exc):
+                raise CriticalProtocolError("verifiable claim extraction transport exhausted") from exc
+            raise CriticalProtocolError("verifiable claim extraction failed") from exc
+        self._save(key, {"claims": texts})
         self._record(key, time.perf_counter() - start, cached=False)
-        return _sentence_claims(sentence, texts, fallback)
+        return _sentence_claims(sentence, texts)
 
     def _load_batch(self, key: str, ids: Sequence[str]) -> tuple[str, dict[str, list[str]]] | None:
         cached = self._load(key)
@@ -678,9 +522,9 @@ class VerifiableClaimExtractor(_CachedComponent):
         except (StructuredOutputParseError, StructuredOutputSchemaError):
             return {_ROUTE_FIELD: "window"}
         except Exception as exc:
-            if not is_retryable_llm_exception(exc):
-                raise CriticalProtocolError("verifiable claim extraction failed") from exc
-            return {_ROUTE_FIELD: "window"}
+            if is_retryable_llm_exception(exc):
+                raise CriticalProtocolError("verifiable claim extraction transport exhausted") from exc
+            raise CriticalProtocolError("verifiable claim extraction failed") from exc
         return {"sentences": [{"id": sentence_id, "claims": found[sentence_id]} for sentence_id in ids]}
 
     def _extract_batch(
@@ -701,7 +545,7 @@ class VerifiableClaimExtractor(_CachedComponent):
             outcome = _batch_outcome(payload, ids)
         route, found = outcome
         if route == "claims":
-            return {sentence.id: _sentence_claims(sentence, found[sentence.id], False) for sentence in focus}
+            return {sentence.id: _sentence_claims(sentence, found[sentence.id]) for sentence in focus}
         if route == "bisect" and len(positions) > 1:
             middle = len(positions) // 2
             return {
@@ -714,77 +558,6 @@ class VerifiableClaimExtractor(_CachedComponent):
         }
 
 
-class VeriScoreClaimVerifier(_CachedComponent):
-    component = "veriscore_claim_verifier"
-    protocol = "veriscore-verdict-v1"
-    config_root = "veriscore"
-    repair_message = (
-        "The preceding structured answer was rejected. Return one JSON object with exactly one allowed verdict."
-    )
-
-    def __init__(
-        self,
-        cfg,
-        usage=None,
-        *,
-        cache_only: bool = False,
-        embedder: Embedder | None = None,
-        request_pacer: RequestPacer | None = None,
-    ):
-        super().__init__(cfg, "claim_verifier", usage, cache_only=cache_only, request_pacer=request_pacer)
-        self.labels = str(config_value(self.section, "labels", "binary"))
-        self.evidence_scope = str(config_value(self.section, "evidence_scope", "top_k"))
-        self.max_sentences = int(config_value(self.section, "max_evidence_sentences", 10))
-        if self.labels not in LABEL_SETS:
-            raise ValueError("veriscore.claim_verifier.labels must be binary or ternary")
-        if self.evidence_scope not in {"top_k", "full_context"}:
-            raise ValueError("veriscore.claim_verifier.evidence_scope must be top_k or full_context")
-        if self.max_sentences <= 0:
-            raise ValueError("veriscore.claim_verifier.max_evidence_sentences must be positive")
-        self.stopwords = set(getattr(cfg.matching, "stopwords", []) or [])
-        self.embedder = embedder
-        self.schema: dict[str, Any] = {
-            "type": "object",
-            "properties": {"verdict": {"type": "string", "enum": list(LABEL_SETS[self.labels])}},
-            "required": ["verdict"],
-            "additionalProperties": False,
-        }
-
-    def _validated_label(self, payload: dict[str, Any]) -> str:
-        validate_json_document(payload, self.schema)
-        return str(payload["verdict"])
-
-    def verify_claim(self, claim: str, context: str, query: str | None) -> VeriScoreVerdict:
-        retrieved = tuple(select_claim_evidence(
-            context, query, claim, max_sentences=self.max_sentences,
-            stopwords=self.stopwords, embedder=self.embedder,
-        ))
-        shown = retrieved if self.evidence_scope == "top_k" else tuple(_source_spans(context, query))
-        messages = verification_messages(self.labels, claim, shown)
-        key = self._cache_key({"messages": messages})
-        cached = self._load(key)
-        if cached is not None:
-            label, reason = cached.get("verdict"), cached.get("_hallu_fallback_reason")
-            if (label in LABEL_SETS[self.labels] and reason is None) or (label is None and reason in FALLBACK_REASONS):
-                self._record(key, 0.0, cached=True)
-                return VeriScoreVerdict(label, retrieved, cache_hit=True, fallback_reason=reason)
-        if self.cache_only:
-            raise CacheOnlyMissError(self.component, key, self.cache_dir / f"{key}.json")
-        start = time.perf_counter()
-        label, reason = None, None
-        try:
-            label = self._retry_validated_json(messages, self.schema, "veriscore_verdict", self._validated_label)
-        except (StructuredOutputParseError, StructuredOutputSchemaError):
-            reason = "structured_output_exhausted"
-        except Exception as exc:
-            if not is_retryable_llm_exception(exc):
-                raise CriticalProtocolError(f"VeriScore claim verification failed for {claim!r}") from exc
-            reason = "transient_exhausted"
-        self._save(key, {"verdict": label, "_hallu_fallback_reason": reason})
-        self._record(key, time.perf_counter() - start, cached=False)
-        return VeriScoreVerdict(label, retrieved, fallback_reason=reason)
-
-
 class VeriScorePipeline:
     protocol = VERISCORE_PROTOCOL
 
@@ -792,15 +565,11 @@ class VeriScorePipeline:
         section = getattr(cfg, "veriscore", None)
         if section is None:
             raise ValueError("veriscore config is required")
+        if str(config_value(section.claim_verifier, "labels", "")) != "critical":
+            raise ValueError("VeriScore correction requires the four-way critical claim verifier")
         pacer = RequestPacer(float(getattr(cfg.llm, "request_min_interval_s", 0)))
         self.extractor = VerifiableClaimExtractor(cfg, usage, cache_only=cache_only, request_pacer=pacer)
-        self.reviewer = (
-            FullContextReviewer(cfg, usage, cache_only=cache_only, request_pacer=pacer)
-            if bool(config_value(section, "coverage_review", False)) else None
-        )
-        labels = str(config_value(config_value(section, "claim_verifier"), "labels", "binary"))
-        verifier_type = CriticalClaimVerifier if labels == "critical" else VeriScoreClaimVerifier
-        self.verifier = verifier_type(
+        self.verifier = CriticalClaimVerifier(
             cfg, usage, cache_only=cache_only, embedder=embedder, request_pacer=pacer
         )
 
@@ -818,14 +587,6 @@ class VeriScorePipeline:
 
         emit("claim_extraction")
         claims = self.extractor.extract(response, query)
-        if self.reviewer is not None:
-            emit("coverage_review", len(claims), len(claims))
-            sentences = answer_sentences(response, self.extractor.min_sentence_chars)
-            known = [AtomicClaim(claim.text, claim.start, claim.end, claim.sources) for claim in claims]
-            claims.extend(
-                VerifiableClaim(found.text, _sentence_id(sentences, found.start), found.start, found.end, found.sources)
-                for found in self.reviewer.review(response, context, query, known)
-            )
         claim_total = len(claims)
         claim_interval = max(1, claim_total // 10) if claim_total else 1
         emit("claim_verification", 0, claim_total)
@@ -835,7 +596,6 @@ class VeriScorePipeline:
             audits.append({
                 "claim": claim.to_dict(),
                 "evidence": [span.to_dict() for span in decision.evidence],
-                "label": getattr(decision, "label", decision.verdict),
                 "verdict": decision.verdict,
                 "verifier_cache_hit": decision.cache_hit,
                 "verifier_protocol_fallback": decision.protocol_fallback,

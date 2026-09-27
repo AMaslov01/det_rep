@@ -2,6 +2,9 @@ import pytest
 
 from det_rep.gemini import validate_gateway_manifest
 from det_rep.llm import OpenAICompatibleCorrector
+from det_rep.core.dspy_adapter import GatewayIdentityDriftError, validate_completion_envelope
+from det_rep.core.config import Config, litellm_transport_model
+from gemini_gateway.settings import GatewaySettings
 
 
 def test_gateway_manifest_must_match_exact_model_and_revision():
@@ -13,6 +16,27 @@ def test_gateway_manifest_must_match_exact_model_and_revision():
     assert len(validate_gateway_manifest(value, "openai/gemini-3.5-flash")) == 64
     with pytest.raises(ValueError, match="cloud_run_revision"):
         validate_gateway_manifest({**value, "cloud_run_revision": ""}, "openai/gemini-3.5-flash")
+
+
+def test_litellm_preserves_gateway_model_after_provider_prefix_is_removed():
+    gateway = Config({"llm": {"model": "openai/gemini-3.5-flash", "structured_output_backend": "vertex"}})
+    local = Config({"llm": {"model": "openai/local-model", "structured_output_backend": "xgrammar"}})
+    assert gateway.llm.model == "openai/gemini-3.5-flash"
+    assert litellm_transport_model(gateway) == "openai/openai/gemini-3.5-flash"
+    assert litellm_transport_model(local) == "openai/local-model"
+
+
+def test_gemini_completion_guard_accepts_only_pinned_gateway_revision(monkeypatch):
+    settings = GatewaySettings("project", "secret", gateway_release="release", cloud_run_revision="revision")
+    monkeypatch.setenv("EXPECTED_GATEWAY_MANIFEST_SHA256", settings.manifest_sha256)
+    response = {
+        "system_fingerprint": settings.system_fingerprint,
+        "choices": [{"finish_reason": "stop"}],
+    }
+    validate_completion_envelope(response)
+    changed = GatewaySettings("project", "secret", gateway_release="release", cloud_run_revision="other")
+    with pytest.raises(GatewayIdentityDriftError):
+        validate_completion_envelope({**response, "system_fingerprint": changed.system_fingerprint})
 
 
 def test_generation_cache_fingerprint_changes_with_checkpoint_and_never_calls_cache_only(tmp_path):

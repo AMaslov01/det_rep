@@ -394,9 +394,9 @@ class KGExtractor:
             raise RuntimeError("cache-only mode forbids constructing a KGGen/LLM backend")
         if self._backend is None:
             from kg_gen import KGGen  # lazy import; not needed for offline tests
-            from .config import resolve_api_key
+            from .config import litellm_transport_model, resolve_api_key
 
-            kwargs: dict[str, Any] = {"model": self.model, "temperature": self.temperature}
+            kwargs: dict[str, Any] = {"model": litellm_transport_model(self.cfg), "temperature": self.temperature}
             if self.max_tokens is not None:
                 kwargs["max_tokens"] = self.max_tokens
             api_key = resolve_api_key(self.cfg)
