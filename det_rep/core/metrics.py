@@ -13,8 +13,9 @@ verdict.  It never substitutes ``RP_grounded`` for factual support:
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .matching import RefGraph, normalize
 
@@ -157,6 +158,21 @@ class ScoreResult:
             return graph_h
         return (1.0 - beta) * graph_h + beta * claim_h
 
+    def veriscore_precision(self) -> float | None:
+        audits = list((self.critical or {}).get("claim_audits", []))
+        if not audits:
+            return None
+        supported, total = veriscore_counts(audits)
+        return supported / total
+
+    def veriscore_h(self, impute: float | None = None) -> float | None:
+        precision = self.veriscore_precision()
+        return impute if precision is None else 1.0 - precision
+
+    def veriscore_f1(self, k: int) -> float:
+        supported, total = veriscore_counts((self.critical or {}).get("claim_audits", []))
+        return veriscore_f1_at_k(supported, total, k)
+
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "Vc": self.Vc, "Ec": self.Ec, "Vq": self.Vq, "Eq": self.Eq,
@@ -255,7 +271,7 @@ def score_response(
             if answer_text is None:
                 raise ValueError("support-critical scoring requires answer_text")
             res.critical = {
-                "protocol": "support-critical-v1",
+                "protocol": getattr(critical_pipeline, "protocol", "support-critical-v1"),
                 "claim_audits": critical_pipeline.assess(
                     answer_text, context, query, progress_hook=progress_hook
                 ),
@@ -372,7 +388,7 @@ def score_response(
         if answer_text is None:
             raise ValueError("support-critical scoring requires answer_text")
         res.critical = {
-            "protocol": "support-critical-v1",
+            "protocol": getattr(critical_pipeline, "protocol", "support-critical-v1"),
             "claim_audits": critical_pipeline.assess(
                 answer_text, context, query, progress_hook=progress_hook
             ),
@@ -391,3 +407,34 @@ def cfi(eg: float, rp: float | None, alpha: float) -> float:
 
 def hallucination(cfi_value: float) -> float:
     return 1.0 - cfi_value
+
+
+def veriscore_counts(audits: Iterable[dict[str, Any]]) -> tuple[int, int]:
+    verdicts = [audit.get("verdict") for audit in audits]
+    return sum(1 for verdict in verdicts if verdict == "entailed"), len(verdicts)
+
+
+def veriscore_f1_at_k(supported: int, total: int, k: int) -> float:
+    if k <= 0:
+        raise ValueError("VeriScore K must be positive")
+    if not 0 <= supported <= total:
+        raise ValueError("supported claims must be a subset of all claims")
+    if supported == 0:
+        return 0.0
+    precision = supported / total
+    recall = min(supported / k, 1.0)
+    return 2 * precision * recall / (precision + recall)
+
+
+def veriscore_k(claim_counts: Iterable[int]) -> int:
+    counts = sorted(int(count) for count in claim_counts)
+    if not counts:
+        raise ValueError("VeriScore K needs at least one response")
+    return max(1, int(statistics.median_low(counts)))
+
+
+def veriscore(responses: Iterable[tuple[int, int]], k: int) -> float:
+    scores = [veriscore_f1_at_k(supported, total, k) for supported, total in responses]
+    if not scores:
+        raise ValueError("VeriScore needs at least one response")
+    return sum(scores) / len(scores)

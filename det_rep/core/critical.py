@@ -360,6 +360,12 @@ class _CachedComponent:
 
     component: str = "critical_component"
     protocol: str = "support-critical-v1"
+    config_root: str = "support_critical"
+    repair_message: str = (
+        "The preceding structured answer was rejected. Return one JSON object matching the "
+        "given schema exactly. For every claim, copy text verbatim from the answer and use "
+        "zero-based, end-exclusive Python offsets for that exact substring."
+    )
 
     def __init__(
         self,
@@ -370,12 +376,12 @@ class _CachedComponent:
         cache_only: bool = False,
         request_pacer: RequestPacer | None = None,
     ):
-        critical_cfg = getattr(cfg, "support_critical", None)
+        critical_cfg = getattr(cfg, self.config_root, None)
         if critical_cfg is None:
-            raise ValueError("support_critical config is required")
+            raise ValueError(f"{self.config_root} config is required")
         section = getattr(critical_cfg, section_name, None)
         if section is None:
-            raise ValueError(f"support_critical.{section_name} config is required")
+            raise ValueError(f"{self.config_root}.{section_name} config is required")
         self.cfg = cfg
         self.section = section
         self.model = cfg.llm.model
@@ -616,14 +622,7 @@ class _CachedComponent:
                     raise
                 retry_messages = [
                     *messages,
-                    {
-                        "role": "system",
-                        "content": (
-                            "The preceding structured answer was rejected. Return one JSON object matching the "
-                            "given schema exactly. For every claim, copy text verbatim from the answer and use "
-                            "zero-based, end-exclusive Python offsets for that exact substring."
-                        ),
-                    },
+                    {"role": "system", "content": self.repair_message},
                 ]
         raise AssertionError("unreachable structured-output retry state")
 
