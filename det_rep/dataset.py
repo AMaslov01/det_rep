@@ -13,10 +13,28 @@ from .util import atomic_json, digest, file_digest, read_json, text_digest
 
 
 EXPECTED_QA_SOURCES = 989
+COHORT_SIZE = 750
+CACHE_NAMESPACE = "ec-veriscore-r750-v1"
+SOURCE_SHA256 = "0dffc26ea9f3c1c3d7c7e8336b56ef1646e3cec876edffcca3c9c624d12d578b"
+ANSWER_SHA256 = "46cc5679aabc03a101354d1cc5ab7cf8014a7b92f69e758680247b2cb7578ebc"
+SELECTED_SOURCE_IDS_SHA256 = "90f138c71223b62e49ca6606c59d3f97e3b698b1bc9ccde6d15fa6ddcb5c856f"
 SPLIT_SEED = 42
 TEST_SOURCES = 198
 REQUIRED_COLUMNS = frozenset({"id", "generated_response", "prompt", "hallucination", "annotation_reason", "annotation_raw", "annotation_model"})
 ID_PREFIX = "llama31_8b_"
+
+
+def validate_pinned_inputs(source_path: str | Path, answer_path: str | Path) -> None:
+    if file_digest(source_path) != SOURCE_SHA256 or file_digest(answer_path) != ANSWER_SHA256:
+        raise ValueError("the 750-answer run requires the exact source and answer snapshots")
+
+
+def selected_answers(examples: tuple[Example, ...]) -> tuple[Example, ...]:
+    """Return the complete pinned cohort, regardless of split or input label."""
+    selected = tuple(sorted(examples, key=lambda row: int(row.source_id)))
+    if len(selected) != COHORT_SIZE or digest([row.source_id for row in selected]) != SELECTED_SOURCE_IDS_SHA256:
+        raise ValueError("the available source IDs differ from the pinned 750-answer cohort")
+    return selected
 
 
 def qa_sources(path: str | Path) -> dict[str, dict[str, Any]]:

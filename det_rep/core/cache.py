@@ -15,6 +15,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from .dspy_adapter import STRUCTURED_OUTPUT_PROTOCOL_VERSION
+
 
 class CacheOnlyMissError(RuntimeError):
     """Raised when an offline replay needs an artifact that is not cached."""
@@ -42,20 +44,6 @@ def config_value(section: Any, name: str, default: Any = None) -> Any:
     return getattr(section, name, default)
 
 
-def _structured_output_request_backend(llm: Any) -> str | None:
-    configured = config_value(llm, "structured_output_request_backend")
-    if configured is not None:
-        return str(configured)
-    if (
-        config_value(llm, "structured_output_transport", "none") == "response_format"
-        and config_value(llm, "structured_output_backend", "none") == "xgrammar"
-    ):
-        from .dspy_adapter import XGRAMMAR_STRICT_REQUEST_BACKEND
-
-        return XGRAMMAR_STRICT_REQUEST_BACKEND
-    return None
-
-
 @lru_cache(maxsize=1)
 def _installed_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
@@ -79,7 +67,7 @@ def _installed_versions() -> dict[str, str]:
 
 
 def evaluation_runtime_metadata(cfg: Any) -> dict[str, Any]:
-    """Return the reproducibility identity written beside evaluation metrics.
+    """Return the human-readable reproducibility identity for a run.
 
     This is intentionally human-readable rather than hashed.  Cache keys use
     the same LLM identity below, while reports retain the embedding asset and
@@ -98,7 +86,6 @@ def evaluation_runtime_metadata(cfg: Any) -> dict[str, Any]:
         "structured_output_backend": config_value(
             llm, "structured_output_backend", "none"
         ),
-        "structured_output_request_backend": _structured_output_request_backend(llm),
         "cluster_context_mode": config_value(
             extraction, "cluster_context_mode", "empty"
         ),
@@ -121,12 +108,6 @@ def evaluation_runtime_metadata(cfg: Any) -> dict[str, Any]:
 def llm_runtime_fingerprint(cfg: Any) -> dict[str, Any]:
     """Return the common, JSON-serialisable part of LLM-backed cache keys."""
     llm = cfg.llm
-    try:
-        from .dspy_adapter import STRUCTURED_OUTPUT_PROTOCOL_VERSION
-    except (ImportError, AttributeError):
-        # Old configs and fully offline unit tests do not import DSPy.  The
-        # marker still invalidates artifacts made before the strict protocol.
-        STRUCTURED_OUTPUT_PROTOCOL_VERSION = "legacy-adapter"
     return {
         "model": config_value(llm, "model"),
         "model_revision": config_value(llm, "model_revision"),
@@ -138,7 +119,6 @@ def llm_runtime_fingerprint(cfg: Any) -> dict[str, Any]:
         "structured_output_backend": config_value(
             llm, "structured_output_backend", "none"
         ),
-        "structured_output_request_backend": _structured_output_request_backend(llm),
         "structured_output_protocol": STRUCTURED_OUTPUT_PROTOCOL_VERSION,
         "runtime_fingerprint": config_value(llm, "runtime_fingerprint"),
         "python_version": platform.python_version(),

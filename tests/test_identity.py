@@ -2,7 +2,7 @@ import pytest
 
 from det_rep.gemini import validate_gateway_manifest
 from det_rep.llm import OpenAICompatibleCorrector
-from det_rep.core.dspy_adapter import GatewayIdentityDriftError, validate_completion_envelope
+from det_rep.core.dspy_adapter import GatewayIdentityDriftError, validate_completion_envelope, validate_structured_output_settings
 from det_rep.core.config import Config, litellm_transport_model
 from gemini_gateway.settings import GatewaySettings
 
@@ -20,10 +20,27 @@ def test_gateway_manifest_must_match_exact_model_and_revision():
 
 def test_litellm_preserves_gateway_model_after_provider_prefix_is_removed():
     gateway = Config({"llm": {"model": "openai/gemini-3.5-flash", "structured_output_backend": "vertex"}})
-    local = Config({"llm": {"model": "openai/local-model", "structured_output_backend": "xgrammar"}})
     assert gateway.llm.model == "openai/gemini-3.5-flash"
     assert litellm_transport_model(gateway) == "openai/openai/gemini-3.5-flash"
-    assert litellm_transport_model(local) == "openai/local-model"
+    with pytest.raises(ValueError, match="Gemini gateway"):
+        litellm_transport_model(Config({"llm": {"model": "local-model"}}))
+
+
+def test_only_current_vertex_json_schema_transport_is_accepted():
+    current = {
+        "structured_output_transport": "response_format",
+        "structured_output_backend": "vertex",
+        "model_revision": "gemini:r1", "runtime_fingerprint": "gateway:fixture",
+    }
+    validate_structured_output_settings(Config(current))
+    for legacy in (
+        {"structured_output_transport": "guided_json"},
+        {"structured_output_backend": "xgrammar"},
+        {"vllm_guided_json": True},
+        {"structured_output_request_backend": "xgrammar:disable-any-whitespace,no-fallback"},
+    ):
+        with pytest.raises(ValueError):
+            validate_structured_output_settings(Config({**current, **legacy}))
 
 
 def test_gemini_completion_guard_accepts_only_pinned_gateway_revision(monkeypatch):

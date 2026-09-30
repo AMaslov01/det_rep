@@ -16,7 +16,6 @@ llm:
   concurrency: 1
   structured_output_transport: response_format
   structured_output_backend: vertex
-  structured_output_request_backend: null
   model_revision: null
   runtime_fingerprint: null
   max_tokens: 4096

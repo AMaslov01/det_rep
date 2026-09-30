@@ -22,7 +22,7 @@ from .dspy_adapter import (
     is_retryable_llm_exception,
     json_schema_response_format,
     strict_json_loads,
-    structured_output_settings,
+    validate_structured_output_settings,
     validate_gateway_identity,
     validate_json_document,
 )
@@ -129,7 +129,7 @@ class _CachedComponent:
         self.section = section
         self.model = cfg.llm.model
         self.api_base = getattr(cfg.llm, "api_base", None)
-        self.structured_output = structured_output_settings(cfg.llm)
+        validate_structured_output_settings(cfg.llm)
         self.temperature = float(cfg.llm.temperature)
         self.max_tokens = int(config_value(section, "max_tokens", 512))
         # Gemini can consume output budget on hidden reasoning before emitting a
@@ -153,8 +153,6 @@ class _CachedComponent:
         self.request_min_interval_s = float(getattr(cfg.llm, "request_min_interval_s", 0))
         self.prompt_version = str(config_value(section, "prompt_version", "v1"))
         self.cache_dir = Path(str(config_value(section, "cache_dir")))
-        raw_read_dirs = config_value(section, "cache_read_dirs", []) or []
-        self.cache_read_dirs = [Path(str(path)) for path in raw_read_dirs]
         self.cache_only = bool(cache_only)
         self.usage = usage
         if (
@@ -196,17 +194,11 @@ class _CachedComponent:
         ).hexdigest()
 
     def _load(self, key: str) -> dict[str, Any] | None:
-        # The primary root is writable for the active protocol namespace;
-        # prior roots are read-through only. This lets a retrying Job reuse
-        # completed claim/verdict artifacts after its source commit changes.
-        for root in [self.cache_dir, *self.cache_read_dirs]:
-            try:
-                payload = json.loads((root / f"{key}.json").read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    return payload
-            except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-                continue
-        return None
+        try:
+            payload = json.loads((self.cache_dir / f"{key}.json").read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            return None
 
     def _save(self, key: str, payload: dict[str, Any]) -> None:
         dest = self.cache_dir / f"{key}.json"
@@ -243,14 +235,7 @@ class _CachedComponent:
             kwargs["api_key"] = api_key
         if self.api_base:
             kwargs["api_base"] = self.api_base
-        if self.structured_output.transport == "response_format":
-            kwargs["response_format"] = json_schema_response_format(schema, name=name)
-            if self.structured_output.request_backend is not None:
-                kwargs["extra_body"] = {
-                    "guided_decoding_backend": self.structured_output.request_backend
-                }
-        elif self.structured_output.transport == "guided_json":
-            kwargs["extra_body"] = {"guided_json": schema}
+        kwargs["response_format"] = json_schema_response_format(schema, name=name)
         self.request_pacer.wait_for_turn()
         response = completion(**kwargs)
         validate_gateway_identity(response, label=f"{self.component} completion")

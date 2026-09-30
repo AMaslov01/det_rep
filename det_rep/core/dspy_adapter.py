@@ -1,34 +1,20 @@
-"""Strict and legacy DSPy adapters for explicitly configured runtimes.
+"""Strict Gemini DSPy adapter with native JSON schema responses.
 
-The research runtime uses native OpenAI ``response_format.type=json_schema``
-and deliberately bypasses DSPy's JSON repair and fallback requests.  The old
-vLLM 0.6.3 ``guided_json`` adapter remains only for reproducing legacy
-artifacts; it is not selected by the new DataSphere profile.  Both adapters
-reuse DSPy's typed output schema without changing any KGGen prompt, graph
-extraction, or clustering logic.
-
-Imports deliberately stay inside the factory so ordinary offline tests and
-remote-provider users do not acquire a DSPy/vLLM dependency.
+The research runtime bypasses DSPy's JSON repair and fallback requests.
+Imports stay inside the factory so offline tests do not load DSPy.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import warnings
 from functools import wraps
 from copy import deepcopy
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Literal, get_args, get_origin
 
 
-STRUCTURED_OUTPUT_PROTOCOL_VERSION = "strict-response-format-v5-provider-neutral-json-schema"
-STRUCTURED_OUTPUT_TRANSPORTS = frozenset({"none", "response_format", "guided_json"})
-STRUCTURED_OUTPUT_BACKENDS = frozenset({"xgrammar", "guidance", "vertex"})
-XGRAMMAR_STRICT_REQUEST_BACKEND = (
-    "xgrammar:disable-any-whitespace,no-fallback"
-)
+STRUCTURED_OUTPUT_PROTOCOL_VERSION = "strict-vertex-response-format-v6"
 
 
 class StructuredOutputError(RuntimeError):
@@ -61,7 +47,7 @@ def validate_gateway_identity(response: Any, *, label: str = "completion") -> No
     """Check the gateway fingerprint when a runner pins a manifest hash.
 
     ``EXPECTED_GATEWAY_MANIFEST_SHA256`` is deliberately optional for local
-    offline tests and legacy artifacts.  Live controlled runs set it before
+    offline tests. Live controlled runs set it before
     the first request.  The gateway returns ``<manifest-hash-prefix>:<model
     revision>`` as the OpenAI-compatible ``system_fingerprint`` field.
     """
@@ -159,95 +145,30 @@ def strict_json_loads(document: str, *, label: str = "structured output") -> Any
         ) from exc
 
 
-@dataclass(frozen=True)
-class StructuredOutputSettings:
-    """Validated local structured-output settings derived from ``cfg.llm``."""
-
-    transport: str = "none"
-    backend: str = "xgrammar"
-    request_backend: str | None = None
-    model_revision: str | None = None
-    runtime_fingerprint: str | None = None
-
-
 def _config_value(config: Any, key: str, default: Any = None) -> Any:
     if hasattr(config, "get"):
         return config.get(key, default)
     return getattr(config, key, default)
 
 
-def structured_output_settings(llm_config: Any) -> StructuredOutputSettings:
-    """Read and validate the explicit structured-output runtime contract.
-
-    ``vllm_guided_json: true`` is retained only so old cached/offline configs
-    fail gracefully while Jobs migrate.  It maps to the legacy transport and
-    emits a deprecation warning; it never changes ``llm.model``.
-    """
-    configured_transport = _config_value(llm_config, "structured_output_transport", None)
-    legacy_guided = bool(_config_value(llm_config, "vllm_guided_json", False))
-    if configured_transport is None:
-        transport = "guided_json" if legacy_guided else "none"
-        if legacy_guided:
-            warnings.warn(
-                "llm.vllm_guided_json is deprecated; set "
-                "llm.structured_output_transport explicitly",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-    else:
-        transport = str(configured_transport).strip().lower()
-        if legacy_guided and transport != "guided_json":
-            raise ValueError(
-                "llm.vllm_guided_json conflicts with llm.structured_output_transport"
-            )
-    if transport not in STRUCTURED_OUTPUT_TRANSPORTS:
-        choices = ", ".join(sorted(STRUCTURED_OUTPUT_TRANSPORTS))
-        raise ValueError(f"llm.structured_output_transport must be one of: {choices}")
-
-    backend = str(_config_value(llm_config, "structured_output_backend", "xgrammar")).strip().lower()
-    if backend not in STRUCTURED_OUTPUT_BACKENDS:
-        choices = ", ".join(sorted(STRUCTURED_OUTPUT_BACKENDS))
-        raise ValueError(f"llm.structured_output_backend must be one of: {choices}")
-
-    request_backend = _config_value(
-        llm_config, "structured_output_request_backend", None
-    )
-    expected_request_backend = (
-        XGRAMMAR_STRICT_REQUEST_BACKEND
-        if transport == "response_format" and backend == "xgrammar"
-        else None
-    )
-    if request_backend is not None:
-        request_backend = str(request_backend).strip().lower()
-        if request_backend != expected_request_backend:
-            raise ValueError(
-                "llm.structured_output_request_backend must be "
-                f"{expected_request_backend!r} for transport={transport!r} "
-                f"and backend={backend!r}"
-            )
-    else:
-        request_backend = expected_request_backend
-
-    model_revision = _config_value(llm_config, "model_revision", None)
-    runtime_fingerprint = _config_value(llm_config, "runtime_fingerprint", None)
-    if transport == "response_format" and (not model_revision or not runtime_fingerprint):
-        raise ValueError(
-            "native response_format requires exact llm.model_revision and "
-            "llm.runtime_fingerprint"
-        )
-    return StructuredOutputSettings(
-        transport=transport,
-        backend=backend,
-        request_backend=request_backend,
-        model_revision=str(model_revision) if model_revision else None,
-        runtime_fingerprint=str(runtime_fingerprint) if runtime_fingerprint else None,
-    )
+def validate_structured_output_settings(llm_config: Any) -> None:
+    """Accept only the pinned Vertex gateway's native JSON schema route."""
+    transport = _config_value(llm_config, "structured_output_transport")
+    backend = _config_value(llm_config, "structured_output_backend")
+    if transport != "response_format" or backend != "vertex":
+        raise ValueError("Gemini runtime requires response_format with vertex backend")
+    if _config_value(llm_config, "structured_output_request_backend") is not None or _config_value(llm_config, "vllm_guided_json"):
+        raise ValueError("legacy guided decoding is not supported")
+    model_revision = _config_value(llm_config, "model_revision")
+    runtime_fingerprint = _config_value(llm_config, "runtime_fingerprint")
+    if not model_revision or not runtime_fingerprint:
+        raise ValueError("native response_format requires exact model and runtime revisions")
 
 
 def json_schema_response_format(
     schema: Mapping[str, Any], *, name: str = "dspy_program_outputs"
 ) -> dict[str, Any]:
-    """Build the native OpenAI/vLLM ``response_format`` wire object."""
+    """Build the Gemini gateway's native ``response_format`` wire object."""
     safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "structured_output"
     return {
         "type": "json_schema",
@@ -581,149 +502,7 @@ def specialize_dspy_signature(signature: Any, inputs: Mapping[str, Any]) -> Any:
     return specialized
 
 
-def inline_local_json_schema_refs(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """Expand local ``#/$defs/...`` references in a Pydantic JSON Schema.
-
-    DSPy serialises ``list[Relation]`` as a perfectly valid Pydantic schema
-    whose array item is ``{"$ref": "#/$defs/Relation"}``.  The particular
-    vLLM 0.6.3 structured-output backends available in DataSphere accept a
-    small schema and start a request for this one, but do not honour that
-    local reference: they can emit a bare relation object instead of the
-    required ``{"relations": [...]}`` root.  Expanding a local definition at
-    its reference site preserves the accepted JSON instances; it merely gives
-    the constrained decoder an equivalent schema that does not rely on
-    JSON-Pointer resolution.
-
-    Only references into the root ``$defs`` are expanded.  Foreign and cyclic
-    references are left intact, together with ``$defs``, rather than risking a
-    silent semantic change.  Pydantic's KGGen relation schemas are acyclic and
-    use exactly this local-reference form.
-    """
-    root = deepcopy(dict(schema))
-    definitions = root.get("$defs")
-    if definitions is None:
-        return root
-    if not isinstance(definitions, Mapping):
-        raise TypeError("JSON Schema $defs must be an object")
-
-    def resolve_local_ref(reference: str) -> Any | None:
-        prefix = "#/$defs/"
-        if not reference.startswith(prefix):
-            return None
-        current: Any = definitions
-        # JSON Pointer escaping is required for correctness even though
-        # Pydantic's current Relation name has no escaped characters.
-        for component in reference[len(prefix):].split("/"):
-            component = component.replace("~1", "/").replace("~0", "~")
-            if not isinstance(current, Mapping) or component not in current:
-                raise ValueError(f"unresolvable local JSON Schema reference: {reference}")
-            current = current[component]
-        return current
-
-    def expand(node: Any, active_refs: frozenset[str] = frozenset()) -> Any:
-        if isinstance(node, list):
-            return [expand(item, active_refs) for item in node]
-        if not isinstance(node, Mapping):
-            return deepcopy(node)
-
-        reference = node.get("$ref")
-        if isinstance(reference, str):
-            target = resolve_local_ref(reference)
-            if target is not None:
-                # Recursive models are not part of KGGen's output language.
-                # Retain their original reference rather than expanding it
-                # infinitely or weakening the original schema.
-                if reference in active_refs:
-                    return {key: expand(value, active_refs) for key, value in node.items()}
-                expanded_target = expand(target, active_refs | {reference})
-                siblings = {
-                    key: expand(value, active_refs)
-                    for key, value in node.items()
-                    if key != "$ref"
-                }
-                if not siblings:
-                    return expanded_target
-                # JSON Schema permits sibling constraints next to ``$ref``.
-                # ``allOf`` has the same intersection semantics without
-                # overwriting either the target or those constraints.
-                return {"allOf": [expanded_target, siblings]}
-
-        return {key: expand(value, active_refs) for key, value in node.items()}
-
-    expanded = expand(root)
-
-    def contains_local_def_ref(node: Any) -> bool:
-        if isinstance(node, Mapping):
-            if isinstance(node.get("$ref"), str) and node["$ref"].startswith("#/$defs/"):
-                return True
-            return any(contains_local_def_ref(value) for value in node.values())
-        if isinstance(node, list):
-            return any(contains_local_def_ref(value) for value in node)
-        return False
-
-    # Do not remove definitions if a recursive reference could not be safely
-    # inlined.  For KGGen's acyclic Relation schema this removes ``$defs`` and
-    # produces the exact flat grammar required by vLLM 0.6.3.
-    if not contains_local_def_ref(expanded):
-        expanded.pop("$defs", None)
-    return expanded
-
-
-_NON_SEMANTIC_SCHEMA_ANNOTATIONS = frozenset({
-    "title",
-    "description",
-    "examples",
-    "default",
-    "$comment",
-    # ``desc`` is DSPy's legacy field metadata, not a JSON Schema keyword.
-    "desc",
-})
-_SCHEMA_MAP_KEYWORDS = frozenset({"$defs", "patternProperties", "dependentSchemas"})
-
-
-def canonicalize_vllm_guided_json_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the constraint-bearing JSON Schema accepted by vLLM 0.6.3.
-
-    In addition to local ``$defs`` expansion, remove annotations and DSPy's
-    private ``__dspy_*`` metadata.  These keywords do not restrict which JSON
-    documents validate; they are prompt/UI metadata.  Keeping them in the
-    grammar sent to the old Outlines backend makes it silently ignore the
-    enclosing object for KGGen's dynamic fallback Relation schema.  Removing
-    them therefore preserves exactly the same JSON language while avoiding
-    that backend defect.
-    """
-    expanded = inline_local_json_schema_refs(schema)
-
-    def clean(node: Any, *, property_map: bool = False) -> Any:
-        if isinstance(node, list):
-            return [clean(value) for value in node]
-        if not isinstance(node, Mapping):
-            return deepcopy(node)
-        if property_map:
-            # A user is allowed to name a JSON property ``title`` or ``desc``;
-            # these are property names here, not schema annotations.
-            return {str(key): clean(value) for key, value in node.items()}
-
-        result: dict[str, Any] = {}
-        for key, value in node.items():
-            if key in _NON_SEMANTIC_SCHEMA_ANNOTATIONS or key.startswith("__dspy_"):
-                continue
-            if key == "properties":
-                if not isinstance(value, Mapping):
-                    raise TypeError("JSON Schema properties must be an object")
-                result[key] = clean(value, property_map=True)
-            elif key in _SCHEMA_MAP_KEYWORDS:
-                if not isinstance(value, Mapping):
-                    raise TypeError(f"JSON Schema {key} must be an object")
-                result[key] = clean(value, property_map=True)
-            else:
-                result[key] = clean(value)
-        return result
-
-    return clean(expanded)
-
-
-def strict_json_schema_adapter(*, request_backend: str | None = None) -> Any:
+def strict_json_schema_adapter() -> Any:
     """Return a DSPy JSON adapter with one strict native-schema request.
 
     DSPy 2.6's stock :class:`JSONAdapter` catches *any* structured-output
@@ -789,20 +568,8 @@ def strict_json_schema_adapter(*, request_backend: str | None = None) -> Any:
             if previous_extra is not None:
                 if not isinstance(previous_extra, Mapping):
                     raise TypeError("DSPy lm_kwargs.extra_body must be a mapping")
-                cleaned_extra = dict(previous_extra)
-                cleaned_extra.pop("guided_json", None)
-                if cleaned_extra:
-                    request_kwargs["extra_body"] = cleaned_extra
-                else:
-                    request_kwargs.pop("extra_body", None)
-            if request_backend is not None:
-                previous_extra = request_kwargs.get("extra_body", {})
-                if not isinstance(previous_extra, Mapping):
-                    raise TypeError("DSPy lm_kwargs.extra_body must be a mapping")
-                request_kwargs["extra_body"] = {
-                    **dict(previous_extra),
-                    "guided_decoding_backend": request_backend,
-                }
+                if "guided_json" in previous_extra or "guided_decoding_backend" in previous_extra:
+                    raise ValueError("legacy guided decoding is not supported")
             request_kwargs["response_format"] = json_schema_response_format(
                 schema,
                 name=getattr(signature, "__name__", "dspy_program_outputs"),
@@ -996,52 +763,3 @@ def is_retryable_llm_exception(exc: BaseException) -> bool:
             "unexpected eof",
         )
     )
-
-
-def vllm_guided_json_adapter() -> Any:
-    """Return a DSPy adapter that sends each output schema as ``guided_json``.
-
-    ``JSONAdapter`` already owns DSPy's JSON prompt and parser behaviour.  We
-    reuse its private schema builder (pinned together with DSPy in the
-    DataSphere runtime) and call ``ChatAdapter`` directly only to avoid
-    replacing the vLLM-native constrained parameter with the broken
-    ``response_format`` route.  A schema-building failure intentionally falls
-    back to DSPy's normal ``JSONAdapter`` instead of silently weakening output
-    validation.
-    """
-    from dspy.adapters.chat_adapter import ChatAdapter
-    from dspy.adapters.json_adapter import JSONAdapter, _get_structured_outputs_response_format
-
-    class VLLMGuidedJSONAdapter(JSONAdapter):
-        def __call__(
-            self,
-            lm: Any,
-            lm_kwargs: dict[str, Any],
-            signature: Any,
-            demos: list[dict[str, Any]],
-            inputs: dict[str, Any],
-        ) -> list[dict[str, Any]]:
-            try:
-                output_model = _get_structured_outputs_response_format(signature)
-                schema = canonicalize_vllm_guided_json_schema(output_model.model_json_schema())
-            except Exception:
-                # Preserve DSPy's own compatibility fallback for signatures
-                # which cannot be represented as a closed JSON schema.
-                return super().__call__(lm, lm_kwargs, signature, demos, inputs)
-
-            previous_extra = lm_kwargs.get("extra_body", {})
-            if previous_extra is None:
-                previous_extra = {}
-            if not isinstance(previous_extra, dict):
-                raise TypeError("DSPy lm_kwargs.extra_body must be a mapping")
-            lm_kwargs["extra_body"] = {**previous_extra, "guided_json": schema}
-            # Do not send both controls: vLLM 0.6.3.post1 can ignore
-            # response_format even when a guided-decoding backend is enabled.
-            lm_kwargs.pop("response_format", None)
-            # JSONAdapter supplies the JSON-oriented formatting methods via
-            # dynamic dispatch.  ChatAdapter supplies the one-call execution
-            # path and, because this object is still a JSONAdapter instance,
-            # re-raises a parse error rather than retrying unconstrained text.
-            return ChatAdapter.__call__(self, lm, lm_kwargs, signature, demos, inputs)
-
-    return VLLMGuidedJSONAdapter()

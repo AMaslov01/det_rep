@@ -8,9 +8,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from . import __main__ as cli
-from .contracts import ARM_CODES
+from . import dataset
+from .contracts import ARM_CODES, RUN_PROTOCOL
 from .dataset import load_prepared
+from .relations import verify_relations
 from .runner import export_blind_audit, replay, science_code_inventory
 from .util import atomic_json, atomic_text, digest, file_digest, read_json
 
@@ -81,7 +82,7 @@ def export_variant_provenance(run_dir: str | Path, output: str | Path,
     identity = read_json(root / "run_identity.json")
     report = read_json(root / "replay_summary.json")
     assignments = read_json(root / "evaluation_assignment.json")
-    if identity.get("protocol") != "det-rep-ec-trajectories-v1" or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
+    if identity.get("protocol") != RUN_PROTOCOL or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
         raise ValueError("private provenance requires the fixed E/C protocol")
     if not isinstance(assignments, list) or report.get("assignments_sha256") != digest(assignments):
         raise ValueError("replay assignment hash differs")
@@ -132,43 +133,46 @@ def export_variant_provenance(run_dir: str | Path, output: str | Path,
 
 
 def package_export(
-    *, run_dir: str | Path, work_dir: str | Path, sources: str | Path,
+    *, run_dir: str | Path, relation_dir: str | Path, work_dir: str | Path, sources: str | Path,
     answers: str | Path, manifest: str | Path, repo_dir: str | Path,
     config_path: str | Path, environment_dir: str | Path, out_dir: str | Path,
 ) -> dict[str, Any]:
     """Create a complete private archive and a separate all-unique blind packet."""
-    root, work, source_path, answer_path = (Path(value).resolve() for value in (run_dir, work_dir, sources, answers))
+    root, relations, work, source_path, answer_path = (Path(value).resolve() for value in (run_dir, relation_dir, work_dir, sources, answers))
     manifest_path, repository, config = (Path(value).resolve() for value in (manifest, repo_dir, config_path))
     environment, destination = (Path(value).resolve() for value in (environment_dir, out_dir))
-    cache_root = work / "cache" / "ec-veriscore-v1"
+    cache_root = work / "cache" / dataset.CACHE_NAMESPACE
+    expected_trajectories = dataset.COHORT_SIZE * len(ARM_CODES)
     if destination.exists():
         raise ValueError("archive output already exists")
     if any(destination == item or destination.is_relative_to(item) or item.is_relative_to(destination)
-           for item in (root, cache_root, repository, environment)):
+           for item in (root, relations, cache_root, repository, environment)):
         raise ValueError("archive output must be separate from run, cache, code and environment sources")
     if not manifest_path.is_relative_to(work):
         raise ValueError("input manifest must belong to the work directory")
     for path in (source_path, answer_path, manifest_path, work / "source_split.json", config,
                  root / "run_identity.json", root / "runtime_config.json", root / "gateway_manifest.json",
-                 root / "run_summary.json"):
+                 root / "run_summary.json", relations / "gateway_manifest.json",
+                 relations / "run_identity.json",
+                 relations / "runtime_config.json", relations / "run_summary.json"):
         _require_nonempty(path)
     if not cache_root.is_dir():
-        raise ValueError("the isolated ec-veriscore-v1 scientific cache is missing")
+        raise ValueError("the isolated scientific cache is missing")
     for name in CODE_FILES:
         _require_nonempty(repository / name)
     for name in CODE_DIRS:
         path = repository / name
         if not path.is_dir() or path.is_symlink():
             raise ValueError(f"code snapshot directory is missing or unsafe: {path}")
-    cli.validate_pinned_inputs(source_path, answer_path)
+    dataset.validate_pinned_inputs(source_path, answer_path)
 
     identity, runtime = read_json(root / "run_identity.json"), read_json(root / "runtime_config.json")
     gateway_manifest = read_json(root / "gateway_manifest.json")
     manifest_data, summary = read_json(manifest_path), read_json(root / "run_summary.json")
-    if identity.get("protocol") != "det-rep-ec-trajectories-v1" or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
+    if identity.get("protocol") != RUN_PROTOCOL or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
         raise ValueError("archive requires the fixed one-iteration E/C protocol")
-    if len(identity.get("source_ids", [])) != 100 or len(set(identity["source_ids"])) != 100:
-        raise ValueError("archive requires exactly 100 distinct source IDs")
+    if len(identity.get("source_ids", [])) != dataset.COHORT_SIZE or len(set(identity["source_ids"])) != dataset.COHORT_SIZE:
+        raise ValueError("archive requires exactly 750 distinct source IDs")
     if identity.get("input_manifest_sha256") != file_digest(manifest_path):
         raise ValueError("run input manifest hash differs")
     if manifest_data.get("source_jsonl_sha256") != file_digest(source_path) or manifest_data.get("answer_csv_sha256") != file_digest(answer_path):
@@ -184,25 +188,43 @@ def package_export(
         or identity.get("runtime_config_sha256") != file_digest(root / "runtime_config.json")
         or runtime.get("gateway_manifest") != gateway_manifest):
         raise ValueError("config or gateway differs from pinned runtime")
-    if summary.get("sources") != 100 or summary.get("expected_trajectories") != 400 or summary.get("completed") != 400 or summary.get("failed") != 0:
-        raise ValueError("archive requires 400/400 completed trajectories and zero final failures")
+    if (summary.get("sources") != dataset.COHORT_SIZE or summary.get("expected_trajectories") != expected_trajectories
+        or summary.get("completed") != expected_trajectories or summary.get("failed") != 0):
+        raise ValueError(f"archive requires {expected_trajectories}/{expected_trajectories} completed trajectories and zero final failures")
     if summary.get("run_fingerprint") != digest(identity):
         raise ValueError("run summary differs from identity")
     if (root / "failures").exists() and any((root / "failures").rglob("*.json")):
         raise ValueError("archive contains unresolved failure files")
     _read_environment(environment, runtime, gateway_manifest)
     examples = load_prepared(source_path, answer_path, manifest_path)
-    selected = cli.smoke_selection(examples, 100)
+    selected = dataset.selected_answers(examples)
     if [example.source_id for example in selected] != identity["source_ids"]:
-        raise ValueError("selected source IDs differ from fixed QA100 selection")
-    if digest(identity["source_ids"]) != cli.SELECTED_SOURCE_IDS_SHA256:
-        raise ValueError("selected source IDs differ from frozen QA100 cohort")
+        raise ValueError("selected source IDs differ from fixed 750-answer cohort")
+    if digest(identity["source_ids"]) != dataset.SELECTED_SOURCE_IDS_SHA256:
+        raise ValueError("selected source IDs differ from frozen 750-answer cohort")
+    relation_summary = verify_relations(
+        relations, cache_root / "kg", selected,
+        input_manifest_sha256=file_digest(manifest_path),
+    )
+    relation_runtime = read_json(relations / "runtime_config.json")
+    if (runtime.get("relation_run_fingerprint") != relation_summary["run_fingerprint"]
+        or runtime.get("relation_identity_sha256") != file_digest(relations / "run_identity.json")
+        or read_json(relations / "gateway_manifest.json") != gateway_manifest
+        or relation_runtime.get("cache_namespace") != dataset.CACHE_NAMESPACE
+        or relation_runtime.get("source_sha256") != file_digest(source_path)
+        or relation_runtime.get("answer_sha256") != file_digest(answer_path)
+        or relation_runtime.get("config_sha256") != file_digest(config)
+        or relation_runtime.get("gateway_manifest_sha256") != digest(gateway_manifest)
+        or relation_runtime.get("embedding_revision") != runtime.get("embedding_revision")
+        or relation_runtime.get("gemini_runtime") != runtime.get("gemini_runtime")):
+        raise ValueError("R sweep differs from correction runtime")
     replay_report = replay(root, cache_root, selected)
-    if replay_report["missing"] != 0 or replay_report["completed"] != 400 or replay_report["expected"] != 400:
-        raise ValueError("archive requires replay.missing=0 for 400 assignments")
+    if (replay_report["missing"] != 0 or replay_report["completed"] != expected_trajectories
+        or replay_report["expected"] != expected_trajectories):
+        raise ValueError(f"archive requires replay.missing=0 for {expected_trajectories} assignments")
     provenance = export_variant_provenance(root, root / "variant_provenance.jsonl", require_complete=True)
-    if provenance["variants"] != 400:
-        raise ValueError("private provenance must contain 400 rows")
+    if provenance["variants"] != expected_trajectories:
+        raise ValueError(f"private provenance must contain {expected_trajectories} rows")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{destination.name}-", dir=destination.parent) as temporary:
@@ -218,7 +240,8 @@ def package_export(
         (owner / "config").mkdir()
         shutil.copy2(config, owner / "config" / "run_config.yaml")
         _copy_tree(root, owner / "run")
-        _copy_tree(cache_root, owner / "cache" / "ec-veriscore-v1")
+        _copy_tree(relations, owner / "relation-extraction")
+        _copy_tree(cache_root, owner / "cache" / dataset.CACHE_NAMESPACE)
         _copy_tree(environment, owner / "environment")
         code_root = owner / "code"
         code_root.mkdir()
@@ -236,10 +259,11 @@ def package_export(
         }
         atomic_json(owner / "code_inventory.json", code_inventory)
         atomic_json(owner / "archive_manifest.json", {
-            "protocol": "det-rep-ec-archive-v1", "source_count": 100,
-            "trajectories": 400, "unique_requests": provenance["unique_requests"],
+            "protocol": "det-rep-ec-r-archive-v1", "source_count": dataset.COHORT_SIZE,
+            "relation_artifacts": dataset.COHORT_SIZE,
+            "trajectories": expected_trajectories, "unique_requests": provenance["unique_requests"],
             "run_fingerprint": digest(identity), "input_manifest_sha256": file_digest(manifest_path),
-            "cache_namespace": "ec-veriscore-v1",
+            "cache_namespace": dataset.CACHE_NAMESPACE,
         })
         atomic_text(owner / "README.md", (
             "# Private correction archive\n\n"
@@ -248,7 +272,7 @@ def package_export(
             "Only the sibling evaluator-team directory is suitable for a blind handoff.\n"
         ))
         blind_report = export_blind_audit(root, blind)
-        if blind_report["assignments"] != 400 or blind_report["unique_requests"] != provenance["unique_requests"]:
+        if blind_report["assignments"] != expected_trajectories or blind_report["unique_requests"] != provenance["unique_requests"]:
             raise ValueError("blind packet differs from private provenance")
         atomic_text(blind / "README.md", (
             "# Blind correction requests\n\n"
@@ -278,7 +302,8 @@ def package_export(
             path.chmod(0o700 if path.is_dir() else 0o600)
         staging.rename(destination)
     return {
-        "sources": 100, "trajectories": 400, "final_failures": 0,
+        "sources": dataset.COHORT_SIZE, "relation_artifacts": dataset.COHORT_SIZE,
+        "trajectories": expected_trajectories, "final_failures": 0,
         "blind_requests": blind_report["unique_requests"],
         "private_variants": provenance["variants"], "archive": str(destination),
     }

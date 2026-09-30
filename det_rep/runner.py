@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .arms import PROMPT_VERSION, render_prompt
-from .contracts import ARM_CODES, Corrector, EvaluationRequest, Example, FeedbackProducer, FeedbackRecord, Trajectory, TrajectoryStep
+from .contracts import ARM_CODES, RUN_PROTOCOL, Corrector, EvaluationRequest, Example, FeedbackProducer, FeedbackRecord, Trajectory, TrajectoryStep
 from .evidence import build_evidence
 from .util import atomic_json, atomic_text, digest, file_digest, read_json, text_digest
 
@@ -130,8 +130,8 @@ def run_arms(
     if iterations != 1:
         raise ValueError("the E/C protocol has exactly one revision iteration")
     selected = tuple(examples)
-    if not selected or any(example.split != "train" for example in selected):
-        raise ValueError("v1 smoke runner accepts available training examples only")
+    if not selected:
+        raise ValueError("correction runner requires available answers")
     if len({example.source_id for example in selected}) != len(selected):
         raise ValueError("one original answer per source is required")
     if max_sources is not None and not 1 <= max_sources <= len(selected):
@@ -145,7 +145,7 @@ def run_arms(
     if not isinstance(config_sha, str) or not config_sha:
         raise ValueError("runtime config must pin config_sha256")
     identity = {
-        "protocol": "det-rep-ec-trajectories-v1", "input_manifest_sha256": input_manifest_sha256,
+        "protocol": RUN_PROTOCOL, "input_manifest_sha256": input_manifest_sha256,
         "source_ids": [x.source_id for x in selected], "iterations": iterations,
         "arms": list(ARM_CODES), "prompt_version": PROMPT_VERSION,
         "runner_code_sha256": file_digest(Path(__file__)),
@@ -286,7 +286,7 @@ def replay(run_dir: str | Path, cache_root: str | Path, examples: Iterable[Examp
     """Verify saved artifacts and write audit inputs without model calls."""
     root = Path(run_dir)
     identity = read_json(root / "run_identity.json")
-    if identity.get("protocol") != "det-rep-ec-trajectories-v1" or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
+    if identity.get("protocol") != RUN_PROTOCOL or identity.get("arms") != list(ARM_CODES) or identity.get("iterations") != 1:
         raise ValueError("replay requires the fixed one-iteration E/C protocol")
     if identity.get("science_code_sha256") != digest(science_code_inventory(Path(__file__).resolve().parent)):
         raise ValueError("scientific code differs from pinned run identity")

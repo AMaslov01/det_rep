@@ -3,7 +3,9 @@ import json
 
 import pytest
 
+from det_rep import dataset
 from det_rep.dataset import load_prepared, prepare, qa_sources, source_split
+from det_rep.util import digest
 
 
 def fixture_inputs(tmp_path, answers=750):
@@ -62,3 +64,16 @@ def test_rejects_changed_input_and_duplicate_source(tmp_path):
         stream.write("llama31_8b_1,duplicate,prompt,0,reason,{},fixture\n")
     with pytest.raises(ValueError, match="duplicate"):
         prepare(source_path, answer_path, tmp_path / "work")
+
+
+def test_full_cohort_keeps_both_splits_and_all_labels(tmp_path, monkeypatch):
+    source_path, answer_path = fixture_inputs(tmp_path, 750)
+    manifest, _ = prepare(source_path, answer_path, tmp_path / "work")
+    examples = load_prepared(source_path, answer_path, manifest)
+    monkeypatch.setattr(dataset, "SELECTED_SOURCE_IDS_SHA256", digest([row.source_id for row in examples]))
+    selected = dataset.selected_answers(examples)
+    assert len(selected) == 750
+    assert {row.split for row in selected} == {"train", "test"}
+    assert {row.label for row in selected} == {0, 1}
+    with pytest.raises(ValueError, match="750-answer cohort"):
+        dataset.selected_answers(examples[:-1])

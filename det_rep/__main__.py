@@ -1,22 +1,17 @@
-"""Prepare and package the fixed 100-source E/C correction run."""
+"""Prepare R extraction and the fixed 750-answer E/C correction run."""
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 
-from .contracts import Example
+from . import dataset
 from .dataset import load_prepared, prepare
 from .util import atomic_json, digest, file_digest, read_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CACHE_NAMESPACE = "ec-veriscore-v1"
-SOURCE_SHA256 = "0dffc26ea9f3c1c3d7c7e8336b56ef1646e3cec876edffcca3c9c624d12d578b"
-ANSWER_SHA256 = "46cc5679aabc03a101354d1cc5ab7cf8014a7b92f69e758680247b2cb7578ebc"
-SELECTED_SOURCE_IDS_SHA256 = "c0c893de71d2b887984ae44190328599d7e7fc8c21f1f899da390de90ca300a8"
 
 
 def external(path: str | Path) -> Path:
@@ -24,11 +19,6 @@ def external(path: str | Path) -> Path:
     if value == PROJECT_ROOT or PROJECT_ROOT in value.parents:
         raise ValueError("data, work, and run paths must be outside det_rep")
     return value
-
-
-def validate_pinned_inputs(source_path: Path, answer_path: Path) -> None:
-    if file_digest(source_path) != SOURCE_SHA256 or file_digest(answer_path) != ANSWER_SHA256:
-        raise ValueError("the E/C run requires the exact QA100 source and answer snapshots")
 
 
 def pinned_gateway_manifest(
@@ -53,21 +43,6 @@ def pinned_gateway_manifest(
     return manifest
 
 
-def smoke_selection(examples: tuple[Example, ...], count: int) -> tuple[Example, ...]:
-    if count <= 0 or count % 2:
-        raise ValueError("balanced smoke size must be a positive even number")
-    selected: list[Example] = []
-    for label in (0, 1):
-        pool = sorted(
-            (row for row in examples if row.split == "train" and row.label == label),
-            key=lambda row: hashlib.sha256(f"42\0smoke\0{row.source_id}".encode()).hexdigest(),
-        )
-        if len(pool) < count // 2:
-            raise ValueError("not enough annotated training examples for balanced smoke")
-        selected.extend(pool[:count // 2])
-    return tuple(sorted(selected, key=lambda row: int(row.source_id)))
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -76,19 +51,26 @@ def main() -> None:
     prepared.add_argument("--answers", required=True, help="Llama annotation CSV")
     prepared.add_argument("--work-dir", required=True)
 
-    smoke = sub.add_parser("smoke")
-    smoke.add_argument("--sources", required=True)
-    smoke.add_argument("--answers", required=True)
-    smoke.add_argument("--manifest", required=True)
-    smoke.add_argument("--work-dir", required=True)
-    smoke.add_argument("--run-dir", required=True)
-    smoke.add_argument("--config", default=str(PROJECT_ROOT / "config.example.yaml"))
-    smoke.add_argument("--gateway-url", default=os.environ.get("HALLU_GATEWAY_URL"))
-    smoke.add_argument("--gateway-manifest", help="Optional frozen gateway manifest; permits B when Gemini is unavailable")
-    smoke.add_argument("--embedding-path", required=True)
-    smoke.add_argument("--vllm-url", default=os.environ.get("DET_REP_VLLM_BASE_URL"))
-    smoke.add_argument("--checkpoint", default=os.environ.get("DET_REP_VLLM_CHECKPOINT"))
-    smoke.add_argument("--max-sources", type=int, help="Stop after this many selected source IDs; resume in the same run directory")
+    for command in ("extract-r", "run"):
+        stage = sub.add_parser(command)
+        stage.add_argument("--sources", required=True)
+        stage.add_argument("--answers", required=True)
+        stage.add_argument("--manifest", required=True)
+        stage.add_argument("--work-dir", required=True)
+        stage.add_argument("--relation-dir", required=True)
+        stage.add_argument("--config", default=str(PROJECT_ROOT / "config.example.yaml"))
+        stage.add_argument("--gateway-url", default=os.environ.get("HALLU_GATEWAY_URL"))
+        stage.add_argument("--gateway-manifest", help="Frozen authenticated Gemini gateway manifest")
+        stage.add_argument("--embedding-path", required=True)
+        stage.add_argument("--max-sources", type=int, help="Checkpoint after this many cohort IDs; resume in the same directory")
+        if command == "run":
+            stage.add_argument("--run-dir", required=True)
+            stage.add_argument("--vllm-url", default=os.environ.get("DET_REP_VLLM_BASE_URL"))
+            stage.add_argument("--checkpoint", default=os.environ.get("DET_REP_VLLM_CHECKPOINT"))
+
+    verify_r = sub.add_parser("verify-r", help="Verify complete R artifacts without model calls")
+    for option in ("sources", "answers", "manifest", "work-dir", "relation-dir"):
+        verify_r.add_argument(f"--{option}", required=True)
 
     replay_cmd = sub.add_parser("replay")
     replay_cmd.add_argument("--sources", required=True)
@@ -101,6 +83,7 @@ def main() -> None:
     audit_cmd.add_argument("--out-dir", required=True)
     package_cmd = sub.add_parser("package-export", help="Build private provenance and a separate blind handoff")
     package_cmd.add_argument("--run-dir", required=True)
+    package_cmd.add_argument("--relation-dir", required=True)
     package_cmd.add_argument("--work-dir", required=True)
     package_cmd.add_argument("--sources", required=True)
     package_cmd.add_argument("--answers", required=True)
@@ -120,7 +103,7 @@ def main() -> None:
         from .archive import package_export
 
         report = package_export(
-            run_dir=external(args.run_dir), work_dir=external(args.work_dir),
+            run_dir=external(args.run_dir), relation_dir=external(args.relation_dir), work_dir=external(args.work_dir),
             sources=external(args.sources), answers=external(args.answers),
             manifest=external(args.manifest), repo_dir=Path(args.repo_dir).resolve(),
             config_path=Path(args.config).resolve(), environment_dir=external(args.environment_dir),
@@ -130,7 +113,7 @@ def main() -> None:
         return
     source_path = external(args.sources)
     answer_path = external(args.answers)
-    validate_pinned_inputs(source_path, answer_path)
+    dataset.validate_pinned_inputs(source_path, answer_path)
 
     if args.command == "prepare":
         manifest_path, summary = prepare(source_path, answer_path, external(args.work_dir))
@@ -138,21 +121,29 @@ def main() -> None:
         return
 
     work_dir = external(args.work_dir)
-    cache_root = work_dir / "cache" / CACHE_NAMESPACE
-    run_dir = external(args.run_dir)
+    cache_root = work_dir / "cache" / dataset.CACHE_NAMESPACE
+    run_dir = external(args.run_dir) if args.command in {"run", "replay"} else None
     manifest_path = Path(args.manifest).resolve()
     if work_dir not in manifest_path.parents:
         raise ValueError("manifest must belong to the external work directory")
     examples = load_prepared(source_path, answer_path, manifest_path)
+    selected = dataset.selected_answers(examples)
     if args.command == "replay":
         from .runner import replay
 
-        report = replay(run_dir, cache_root, examples)
+        report = replay(run_dir, cache_root, selected)
+        print(json.dumps(report, sort_keys=True))
+        return
+    if args.command == "verify-r":
+        from .relations import verify_relations
+
+        report = verify_relations(
+            external(args.relation_dir), cache_root / "kg", selected,
+            input_manifest_sha256=file_digest(manifest_path),
+        )
         print(json.dumps(report, sort_keys=True))
         return
 
-    if not args.vllm_url or not args.checkpoint:
-        raise ValueError("local vLLM URL and exact checkpoint are required")
     if not args.gateway_url:
         raise ValueError("--gateway-url or HALLU_GATEWAY_URL is required")
     import yaml
@@ -164,9 +155,57 @@ def main() -> None:
     base = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     if not isinstance(base, dict):
         raise ValueError("config must be a YAML mapping")
-    selected = smoke_selection(examples, 100)
-    if digest([row.source_id for row in selected]) != SELECTED_SOURCE_IDS_SHA256:
-        raise ValueError("the selected source IDs differ from the frozen QA100 cohort")
+    relation_dir = external(args.relation_dir)
+    if run_dir is not None and (relation_dir == run_dir or relation_dir.is_relative_to(run_dir) or run_dir.is_relative_to(relation_dir)):
+        raise ValueError("relation and correction run directories must be separate")
+    gateway_owner = relation_dir if args.command == "extract-r" else run_dir
+    gateway_manifest = pinned_gateway_manifest(
+        gateway_owner, args.gateway_url, base["llm"]["model"],
+        Path(args.gateway_manifest).resolve() if args.gateway_manifest else (
+            relation_dir / "gateway_manifest.json" if args.command == "run" else None
+        ),
+    )
+    os.environ["EXPECTED_GATEWAY_MANIFEST_SHA256"] = digest(gateway_manifest)
+    cfg = runtime_config(base, gateway_manifest, args.gateway_url, args.embedding_path, cache_root)
+    from .core.cache import evaluation_runtime_metadata
+    gateway_path = gateway_owner / "gateway_manifest.json"
+    if gateway_path.exists() and json.loads(gateway_path.read_text(encoding="utf-8")) != gateway_manifest:
+        raise ValueError("run directory has a different gateway revision")
+    atomic_json(gateway_path, gateway_manifest)
+    relation_runtime = {
+        "source_sha256": file_digest(source_path), "answer_sha256": file_digest(answer_path),
+        "config_sha256": file_digest(args.config), "gateway_manifest_sha256": digest(gateway_manifest),
+        "extractor_fingerprint": digest({
+            "llm_runtime": cfg.llm.runtime_fingerprint, "model_revision": cfg.llm.model_revision,
+            "extraction": cfg.extraction.to_dict(),
+        }),
+        "cache_namespace": dataset.CACHE_NAMESPACE, "embedding_revision": cfg.matching.embedding_model_revision,
+        "gemini_runtime": evaluation_runtime_metadata(cfg),
+    }
+    relation_runtime_path = relation_dir / "runtime_config.json"
+    if args.command == "extract-r":
+        if relation_runtime_path.exists() and read_json(relation_runtime_path) != relation_runtime:
+            raise ValueError("R directory has different runtime settings")
+        atomic_json(relation_runtime_path, relation_runtime)
+        from .relations import run_relations
+        from .core.extract import KGExtractor
+
+        r_summary = run_relations(
+            selected, KGExtractor(cfg),
+            run_dir=relation_dir, kg_cache_root=cache_root / "kg",
+            input_manifest_sha256=file_digest(manifest_path), max_sources=args.max_sources,
+        )
+        print(json.dumps(r_summary, sort_keys=True))
+        return
+    from .relations import verify_relations
+    r_summary = verify_relations(
+        relation_dir, cache_root / "kg", selected,
+        input_manifest_sha256=file_digest(manifest_path),
+    )
+    if read_json(relation_runtime_path) != relation_runtime:
+        raise ValueError("R runtime differs from correction runtime")
+    if not args.vllm_url or not args.checkpoint:
+        raise ValueError("local vLLM URL and exact checkpoint are required")
     corrector = OpenAICompatibleCorrector(
         base_url=args.vllm_url, model=base["corrector"]["model"], checkpoint=args.checkpoint,
         cache_dir=cache_root / "generation", seed=int(base["corrector"]["seed"]),
@@ -174,23 +213,14 @@ def main() -> None:
         max_tokens=int(base["corrector"]["max_tokens"]),
     )
     served_model = corrector.preflight()
-    gateway_manifest = pinned_gateway_manifest(
-        run_dir, args.gateway_url, base["llm"]["model"],
-        Path(args.gateway_manifest).resolve() if args.gateway_manifest else None,
-    )
-    os.environ["EXPECTED_GATEWAY_MANIFEST_SHA256"] = digest(gateway_manifest)
-    cfg = runtime_config(base, gateway_manifest, args.gateway_url, args.embedding_path, cache_root)
-    from .core.cache import evaluation_runtime_metadata
-    gateway_path = run_dir / "gateway_manifest.json"
-    if gateway_path.exists() and json.loads(gateway_path.read_text(encoding="utf-8")) != gateway_manifest:
-        raise ValueError("run directory has a different gateway revision")
-    atomic_json(gateway_path, gateway_manifest)
     runtime_record = {
         "config_sha256": file_digest(args.config), "gateway_manifest": gateway_manifest,
-        "cache_namespace": CACHE_NAMESPACE,
+        "cache_namespace": dataset.CACHE_NAMESPACE,
         "embedding_path": str(Path(args.embedding_path).resolve()),
         "embedding_revision": cfg.matching.embedding_model_revision,
         "gemini_runtime": evaluation_runtime_metadata(cfg),
+        "relation_run_fingerprint": r_summary["run_fingerprint"],
+        "relation_identity_sha256": file_digest(relation_dir / "run_identity.json"),
         "corrector": {
             "base_url": args.vllm_url, "model": base["corrector"]["model"],
             "checkpoint": args.checkpoint, "seed": base["corrector"]["seed"],
@@ -203,7 +233,7 @@ def main() -> None:
     if runtime_path.exists() and json.loads(runtime_path.read_text(encoding="utf-8")) != runtime_record:
         raise ValueError("run directory has different runtime settings")
     atomic_json(runtime_path, runtime_record)
-    producer = GeminiFeedbackProducer(cfg, gateway_manifest, cache_root / "feedback")
+    producer = GeminiFeedbackProducer(cfg, gateway_manifest, cache_root / "feedback", entity_cache_only=True)
     summary = run_arms(
         selected, producer, corrector, run_dir=run_dir, cache_root=cache_root,
         input_manifest_sha256=file_digest(manifest_path), iterations=1,

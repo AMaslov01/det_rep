@@ -35,7 +35,7 @@ from .dspy_adapter import (
     StructuredOutputTruncatedError,
     install_dspy_completion_guard,
     is_retryable_llm_exception,
-    structured_output_settings,
+    validate_structured_output_settings,
 )
 from .retry import RetryHeartbeat, StopAfterAttemptsExceptRateLimit, WaitRetryAfterOrExponentialJitter
 
@@ -130,13 +130,8 @@ class UsageLogger:
                     if usage:
                         self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
                         self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
-                    # A localhost vLLM deployment has no meaningful USD price.
-                    # LiteLLM 1.60's generic cost calculator serialises its
-                    # OpenAI-compatible response through Pydantic. Some guided
-                    # JSON responses from a local 8B model can spin there after
-                    # vLLM has already completed, leaving the paid GPU idle.
-                    # Preserve an explicitly supplied provider cost, but never
-                    # invoke the calculator merely for telemetry.
+                    # Use a provider-supplied cost when present. Computing a
+                    # synthetic LiteLLM cost is unnecessary for this run.
                     cost = kwargs.get("response_cost")
                     if cost is not None:
                         self.cost += float(cost)
@@ -282,12 +277,8 @@ class KGExtractor:
             if hasattr(cfg.extraction, "get")
             else getattr(cfg.extraction, "explicit_clustering", False)
         )
-        # Structured output is a transport/runtime property; ``llm.model``
-        # remains the sole model slug.  ``guided_json`` is retained only as a
-        # deprecated compatibility route for old caches and is never selected
-        # by the research DataSphere profile.
-        self.structured_output = structured_output_settings(cfg.llm)
-        self.vllm_guided_json = self.structured_output.transport == "guided_json"
+        # The pinned Gemini gateway uses one native JSON schema route.
+        validate_structured_output_settings(cfg.llm)
         raw_dump_after = os.environ.get("DATASPHERE_KGGEN_DUMP_AFTER_SECONDS", "")
         self.debug_dump_after_s = float(raw_dump_after) if raw_dump_after else None
         if self.debug_dump_after_s is not None and self.debug_dump_after_s <= 0:
@@ -352,8 +343,6 @@ class KGExtractor:
         if self.request_timeout_s <= 0:
             raise ValueError("llm.request_timeout_s must be positive")
         self.cache_dir = Path(cfg.cache_dir)
-        raw_read_dirs = config_value(cfg, "cache_read_dirs", []) or []
-        self.cache_read_dirs = [Path(str(path)) for path in raw_read_dirs]
         self.cache_only = bool(cache_only)
         if not self.cache_only:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -361,10 +350,8 @@ class KGExtractor:
         self._token_budget_lock = threading.RLock()
         self._cluster_audit_lock = threading.Lock()
         self.last_cluster_audit: dict[str, Any] | None = None
-        # Never let an offline FakeKGGen smoke artifact masquerade as a live
-        # KGGen graph.  A cache-only production replay uses ``backend=None``
-        # and therefore receives the same stable ``kggen`` namespace as the
-        # original live extraction without constructing that backend.
+        # A cache-only correction uses the same ``kggen`` namespace as the
+        # earlier live R extraction without constructing the backend.
         self.backend_fingerprint = (
             "kggen"
             if backend is None
@@ -407,9 +394,8 @@ class KGExtractor:
                 kwargs["api_base"] = api_base
             self._backend = KGGen(**kwargs)
             # KGGen 0.4 does not expose DSPy's HTTP timeout in its constructor.
-            # Bound the underlying local-vLLM request anyway: a request that is
-            # never accepted by the server must surface as a retryable error,
-            # not occupy a paid GPU indefinitely.  KGExtractor's tenacity loop
+            # Bound the gateway request so a stalled connection surfaces as a
+            # retryable error. KGExtractor's tenacity loop
             # remains the single retry policy, hence DSPy's own retries are off.
             lm = getattr(self._backend, "lm", None)
             if lm is not None:
@@ -468,19 +454,12 @@ class KGExtractor:
             "chunk_chars": self.chunk_chars,
             "serial_chunking": self.serial_chunking,
             "explicit_clustering": self.explicit_clustering,
-            "vllm_guided_json": self.vllm_guided_json,
         }
         payload = json.dumps(params, sort_keys=True) + "\x00" + text
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _cache_path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.json"
-
-    def _cache_candidates(self, key: str):
-        """Yield the writable cache first, then immutable read-through roots."""
-        yield "primary", self._cache_path(key)
-        for index, root in enumerate(self.cache_read_dirs, start=1):
-            yield f"read-through-{index}", root / f"{key}.json"
 
     @staticmethod
     def _read_cache_file(path: Path, key: str) -> Graph | None:
@@ -509,29 +488,8 @@ class KGExtractor:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
-    def cache_location(self, key: str) -> tuple[str, Path] | None:
-        """Locate a valid entry across primary/read-through roots.
-
-        This is intentionally validation-aware: a file merely existing is not
-        evidence that a cache-only experiment can reproduce it.  A corrupt
-        primary entry must also not hide a valid immutable historical entry.
-        """
-        for origin, path in self._cache_candidates(key):
-            if self._read_cache_file(path, key) is not None:
-                return origin, path
-        return None
-
     def _load_cache(self, key: str) -> Graph | None:
-        # The primary directory is writable for this run.  Read-through roots
-        # are historical, content-addressed graph namespaces: they are never
-        # modified and an envelope/key check still rejects incompatible graphs.
-        # Invalid files are cache misses at that root, not a reason to skip a
-        # valid later read-through root.
-        for _, path in self._cache_candidates(key):
-            graph = self._read_cache_file(path, key)
-            if graph is not None:
-                return graph
-        return None
+        return self._read_cache_file(self._cache_path(key), key)
 
     def _save_cache(self, key: str, graph: Graph) -> None:
         dest = self._cache_path(key)
@@ -570,11 +528,9 @@ class KGExtractor:
 
         KGGen creates dynamic ``Literal[...]`` schemas for all entities and
         predicates before asking the model to cluster them.  That is useful
-        canonicalisation, but a small local model can occasionally emit a very
-        large candidate list.  Building that schema becomes CPU-bound before a
-        new vLLM request is sent.  A finite limit retains every raw triple and
-        simply skips this optional post-processing for that outlier.  ``None``
-        is deliberately the default so non-DataSphere behaviour is unchanged.
+        canonicalisation, but a large candidate list can make dynamic schema
+        construction CPU-bound before a new request. A finite limit retains
+        every raw triple and skips optional post-processing for that outlier.
         """
         if not self.cluster:
             return False
@@ -997,32 +953,22 @@ class KGExtractor:
 
     @contextmanager
     def dspy_context(self, backend: Any):
-        """Scope the optional local-vLLM adapter around a full KGGen call.
+        """Scope the strict Gemini adapter around a full KGGen call.
 
         KGGen creates nested ``dspy.context(lm=...)`` blocks itself.  DSPy's
         context is additive, so this outer block retains the adapter during
         raw extraction *and* official KGGen LLM clustering.
         """
-        if self.structured_output.transport == "none":
-            yield
-            return
         import dspy
 
-        from .dspy_adapter import strict_json_schema_adapter, vllm_guided_json_adapter
+        from .dspy_adapter import strict_json_schema_adapter
 
         lm = getattr(backend, "lm", None)
         if lm is None:
             raise RuntimeError(
-                f"{self.structured_output.transport} requires a KGGen backend with a DSPy LM"
+                "Gemini response_format requires a KGGen backend with a DSPy LM"
             )
-        adapter = (
-            strict_json_schema_adapter(
-                request_backend=self.structured_output.request_backend
-            )
-            if self.structured_output.transport == "response_format"
-            else vllm_guided_json_adapter()
-        )
-        with dspy.context(lm=lm, adapter=adapter):
+        with dspy.context(lm=lm, adapter=strict_json_schema_adapter()):
             yield
 
     def _call_backend(
@@ -1037,7 +983,7 @@ class KGExtractor:
             if self.serial_chunking and len(text) > self.chunk_chars:
                 # KGGen 0.4 implements ``chunk_size`` with an unbounded nested
                 # ThreadPoolExecutor over one shared DSPy LM.  Combining that with
-                # response-level parallelism can deadlock a local vLLM client after
+                # response-level parallelism can stall the shared gateway client after
                 # some successful calls.  Preserve KGGen's algorithm (chunk,
                 # aggregate, then cluster) but schedule the chunks serially.
                 chunks = self._split_text(text, self.chunk_chars)
@@ -1068,9 +1014,9 @@ class KGExtractor:
             else:
                 # ``KGGen.generate(cluster=True)`` is implemented as raw extraction
                 # followed by ``KGGen.cluster(graph)``.  Keep that exact upstream
-                # cluster routine, but make the boundary explicit in the local
-                # profile so a client-side stall can be distinguished from a vLLM
-                # generation stall. A finite cap also needs raw triples first.
+                # cluster routine, but make the phase explicit so a client-side
+                # stall can be distinguished from model generation. A finite cap
+                # also needs raw triples first.
                 explicit_cluster_phase = self.cluster and (
                     self.explicit_clustering
                     or self.cluster_max_items is not None
@@ -1123,9 +1069,8 @@ class KGExtractor:
             progress_callback=lambda payload: self._emit_progress(**payload),
         )
         for attempt in Retrying(
-            # ``0`` leaves non-capacity transient retries to the enclosing
-            # DataSphere Job. A continuous 429 streak has an explicit local
-            # deadline; completed graph calls remain atomic and resumable.
+            # A continuous 429 streak has an explicit local deadline;
+            # completed graph calls remain atomic and resumable.
             stop=(
                 StopAfterAttemptsExceptRateLimit(
                     None if self.max_retries == 0 else self.max_retries,
@@ -1252,38 +1197,3 @@ class KGExtractor:
         g_c = self.extract(context, kind="context")
         g_q = self.extract(query or "", kind="query")
         return g_c, g_q
-
-
-# --------------------------------------------------------------------------------------
-# Offline fake backend (for tests and `run.py --fake-extractor` plumbing checks)
-# --------------------------------------------------------------------------------------
-class FakeKGGen:
-    """A deterministic, dependency-free stand-in for kg_gen.KGGen.
-
-    Extracts a toy graph from text so the full pipeline runs offline. It is NOT a real
-    extractor -- only for exercising plumbing / cache determinism, never for real metrics.
-    """
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    @staticmethod
-    def _tokens(text: str) -> list[str]:
-        import re
-
-        words = re.findall(r"[A-Za-z][A-Za-z0-9]+", text.lower())
-        # keep capitalized-ish / longer tokens as pseudo entities
-        return [w for w in words if len(w) >= 4]
-
-    def generate(self, input_data, cluster=True, chunk_size=None, context=None):  # noqa: ARG002
-        toks = self._tokens(input_data if isinstance(input_data, str) else str(input_data))
-        uniq = list(dict.fromkeys(toks))[:12]
-        rels = set()
-        for a, b in zip(uniq, uniq[1:]):
-            rels.add((a, "co_occurs_with", b))
-
-        class _G:
-            entities = set(uniq)
-            relations = rels
-
-        return _G()

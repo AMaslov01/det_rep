@@ -73,6 +73,6 @@ def litellm_transport_model(cfg: Config) -> str:
     the single-prefix logical ID returned by the gateway manifest.
     """
     model = str(cfg.llm.model)
-    if cfg.llm.get("structured_output_backend") == "vertex" and model.startswith("openai/"):
-        return "openai/" + model
-    return model
+    if not model.startswith("openai/"):
+        raise ValueError("the Gemini gateway model must use the openai/ prefix")
+    return "openai/" + model

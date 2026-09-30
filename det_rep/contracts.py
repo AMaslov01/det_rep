@@ -1,11 +1,12 @@
-"""Versioned records for the E/C correction run and its blind handoff."""
+"""Versioned records for E/C correction and private R extraction."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 
-SCHEMA_VERSION = "det-rep-ec-v1"
+SCHEMA_VERSION = "det-rep-ec-r-v1"
+RUN_PROTOCOL = "det-rep-ec-r-trajectories-v1"
 ARM_CODES = ("B", "E", "C", "EC")
 
 

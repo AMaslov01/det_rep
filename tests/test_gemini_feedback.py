@@ -36,6 +36,26 @@ def config(root: Path):
     return runtime_config(base, MANIFEST, "https://example.invalid", snapshot, root / "cache")
 
 
+def test_entity_graphs_are_cache_only_after_r_sweep_but_claims_remain_live(tmp_path):
+    producer = GeminiFeedbackProducer(
+        config(tmp_path), MANIFEST, tmp_path / "cache" / "feedback", entity_cache_only=True,
+    )
+    assert producer.extractor.cache_only is True
+    assert producer.claim_pipeline.extractor.cache_only is False
+    producer.embedder = DictEmbedder(dim=16)
+    kg = producer.extractor
+    kg.cache_dir.mkdir(parents=True)
+    for text, graph in (
+        (EXAMPLE.context, Graph({"Alice", "Paris"}, set())),
+        (EXAMPLE.query, Graph({"Alice"}, set())),
+        (EXAMPLE.original_answer, Graph({"Alice", "London"}, set())),
+    ):
+        kg._save_cache(kg._cache_key(text), graph)
+    entities = producer.produce_entities(EXAMPLE, EXAMPLE.original_answer, build_evidence(EXAMPLE))
+    assert {item["name"] for item in entities} == {"Alice", "London"}
+    assert kg.usage.calls == 0 and kg.usage.cache_hits == 3
+
+
 class FakeExtractor:
     calls = 0
 

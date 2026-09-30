@@ -120,7 +120,7 @@ def runtime_config(base: dict[str, Any], manifest: dict[str, Any], gateway_url: 
         "model_revision": f"{manifest['vertex_model']}:{manifest['gateway_release']}:{manifest['cloud_run_revision']}",
         "runtime_fingerprint": f"vertex-gateway:{digest({'manifest': manifest_sha, 'code': code_sha, 'det_rep': __version__})}",
         "structured_output_transport": "response_format", "structured_output_backend": "vertex",
-        "structured_output_request_backend": None, "concurrency": 1,
+        "concurrency": 1,
     })
     matching = value["matching"]
     matching.update({
@@ -130,20 +130,19 @@ def runtime_config(base: dict[str, Any], manifest: dict[str, Any], gateway_url: 
     })
     root = Path(cache_root).resolve()
     value["cache_dir"] = str(root / "kg")
-    value["cache_read_dirs"] = []
     value["critical"]["claim_verifier"]["cache_dir"] = str(root / "critical_verdicts")
-    value["critical"]["claim_verifier"]["cache_read_dirs"] = []
     value["veriscore"]["claim_extractor"]["cache_dir"] = str(root / "veriscore_claims")
-    value["veriscore"]["claim_extractor"]["cache_read_dirs"] = []
     return Config(value)
 
 
 class GeminiFeedbackProducer:
     """Produce E and C separately, with durable component-specific caches."""
 
-    def __init__(self, cfg: Config, manifest: dict[str, Any], cache_dir: str | Path, *, cache_only: bool = False):
+    def __init__(self, cfg: Config, manifest: dict[str, Any], cache_dir: str | Path, *,
+                 cache_only: bool = False, entity_cache_only: bool = False):
         self.cfg = cfg
         self.cache_only = cache_only
+        self.entity_cache_only = cache_only or entity_cache_only
         self.manifest_sha = validate_gateway_manifest(manifest, cfg.llm.model)
         if cfg.veriscore.claim_verifier.labels != "critical":
             raise ValueError("E/C correction requires the four-way critical claim verifier")
@@ -182,7 +181,7 @@ class GeminiFeedbackProducer:
     @property
     def extractor(self) -> Any:
         if self._extractor is None:
-            self._extractor = KGExtractor(self.cfg, cache_only=self.cache_only)
+            self._extractor = KGExtractor(self.cfg, cache_only=self.entity_cache_only)
         return self._extractor
 
     @extractor.setter
