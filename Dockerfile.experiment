@@ -15,10 +15,7 @@ USER 65532:65532
 WORKDIR /app
 RUN python3 -m venv /opt/det-rep-venv
 COPY --from=science_packages --chown=65532:65532 /opt/venv/lib/python3.12/site-packages /opt/det-rep-venv/lib/python3.12/site-packages
-COPY --chown=65532:65532 pyproject.toml README.md config.example.yaml ./
-COPY --chown=65532:65532 det_rep ./det_rep
-COPY --chown=65532:65532 gemini_gateway ./gemini_gateway
-COPY --chown=65532:65532 tests ./tests
-COPY --chown=65532:65532 scripts/experiment-entrypoint.sh ./scripts/experiment-entrypoint.sh
+COPY --chown=65532:65532 . ./
+RUN chmod -R a+rX /app
 
 ENTRYPOINT ["/bin/sh", "/app/scripts/experiment-entrypoint.sh"]
