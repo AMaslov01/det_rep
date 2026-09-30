@@ -2,7 +2,7 @@
 
 This repository prepares a paired answer-correction experiment. It joins fixed RAGTruth sources with annotated Llama answers, generates entity and claim feedback through the shared Gemini gateway, and sends matched correction prompts to vLLM. Inputs, model weights, credentials, scientific caches, and run results live outside the repository. The original `hallu_smiles` project remains separate.
 
-**Current status:** the 750-answer R/E/C experiment is being prepared; no new model or server run has been started. Before server work, data transfer, Docker/GPU use, or storage cleanup, read [the server rules](docs/server-resource-rules.md). Execution on caniculus needs a separate command from the owner. The staged procedure is in [the current runbook](docs/caniculus-runbook.md); the completed 12-arm QA100 is [historical](docs/history/qa100-20260919.md).
+**Current status (2026-10-01):** the owner authorized the 750-answer run on caniculus. The frozen scientific snapshot is commit `b95181b`; its one-container R pilot completed 1/1 without a final error, and the full R sweep is running in `/mnt/ssd/a.maslov/det_rep/ec750-b95181b`. Correction and archive stages are gated on complete R verification. Before further server work, data transfer, Docker/GPU use, or storage cleanup, read [the server rules](docs/server-resource-rules.md). The staged procedure and live status paths are in [the current runbook](docs/caniculus-runbook.md); the completed 12-arm QA100 is [historical](docs/history/qa100-20260919.md).
 
 ## Correction protocol
 
