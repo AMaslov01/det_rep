@@ -1,3 +1,6 @@
+ARG SCIENCE_IMAGE=a-maslov-det-rep-experiment:ec750-b2d5ed6
+FROM ${SCIENCE_IMAGE} AS science_packages
+
 FROM vllm/vllm-openai@sha256:370670abb329811c4c44c5712dbacc1d03a3b1be87c55fe3dfd62ea4a76f506b
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,11 +14,11 @@ RUN mkdir -p /work /app /opt/det-rep-venv \
 USER 65532:65532
 WORKDIR /app
 RUN python3 -m venv /opt/det-rep-venv
+COPY --from=science_packages --chown=65532:65532 /opt/venv/lib/python3.12/site-packages /opt/det-rep-venv/lib/python3.12/site-packages
 COPY --chown=65532:65532 pyproject.toml README.md config.example.yaml ./
 COPY --chown=65532:65532 det_rep ./det_rep
 COPY --chown=65532:65532 gemini_gateway ./gemini_gateway
 COPY --chown=65532:65532 tests ./tests
 COPY --chown=65532:65532 scripts/experiment-entrypoint.sh ./scripts/experiment-entrypoint.sh
-RUN python -m pip install --no-cache-dir '.[test]'
 
 ENTRYPOINT ["/bin/sh", "/app/scripts/experiment-entrypoint.sh"]
