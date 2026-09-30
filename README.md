@@ -37,7 +37,7 @@ The S-BERT snapshot needs a local `config.json`. The gateway key is read from `H
 
 ## Future authorized run and handoff
 
-The following CLI stages describe a future authorized run. Run scientific Python in the user's unprivileged Docker container on caniculus under [the resource rules](docs/server-resource-rules.md). Use separate new R and correction directories; the science cache is isolated at `work-dir/cache/ec-veriscore-r750-v1`. `extract-r` must finish and pass integrity checks before `run`; E then uses its KG cache in cache-only mode. Both stages support resumable `--max-sources 1` when separately authorized.
+The following CLI stages run in one unprivileged Docker container on caniculus under [the resource rules](docs/server-resource-rules.md). Its image includes separate Python environments for the experiment and vLLM. The GPU is mounted by its checked UUID, but the vLLM process starts only after R extraction is verified. Inputs and models are read-only mounts; work, scientific caches, and results are on the user's SSD outside the container. Use separate new R and correction directories; the science cache is isolated at `work-dir/cache/ec-veriscore-r750-v1`. `extract-r` must finish and pass integrity checks before `run`; E then uses its KG cache in cache-only mode. Both stages support resumable `--max-sources 1` when separately authorized.
 
 ```bash
 python3.12 -m det_rep extract-r \

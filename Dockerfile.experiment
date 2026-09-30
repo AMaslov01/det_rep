@@ -1,16 +1,16 @@
-FROM python:3.12-slim
+FROM vllm/vllm-openai@sha256:370670abb329811c4c44c5712dbacc1d03a3b1be87c55fe3dfd62ea4a76f506b
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/work \
-    VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:$PATH
+    VIRTUAL_ENV=/opt/det-rep-venv \
+    PATH=/opt/det-rep-venv/bin:$PATH
 
-RUN mkdir -p /work /app /opt/venv \
-    && chown -R 65532:65532 /opt/venv /work /app
+RUN mkdir -p /work /app /opt/det-rep-venv \
+    && chown -R 65532:65532 /opt/det-rep-venv /work /app
 USER 65532:65532
 WORKDIR /app
-RUN python -m venv /opt/venv
+RUN python3 -m venv /opt/det-rep-venv
 COPY --chown=65532:65532 pyproject.toml README.md config.example.yaml ./
 COPY --chown=65532:65532 det_rep ./det_rep
 COPY --chown=65532:65532 gemini_gateway ./gemini_gateway
